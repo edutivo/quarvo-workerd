@@ -105,6 +105,36 @@ bazel test //src/workerd/api/tests:worker-loader-memory-test \
            //src/workerd/api/tests:worker-loader-test
 ```
 
+## Cold-build gotchas (fork-specific fixes vs. stock upstream)
+
+Upstream builds with Cloudflare's **Bazel remote cache**, so its CI rarely compiles anything from
+scratch. A fork has no access to that cache, so a **cold** build exposes things upstream's cache
+hides. The fixes that live in this fork because of that:
+
+1. **Toolchain (`quarvo/Dockerfile`)** — `node:trixie` (Debian 13) has **no `software-properties-common`**
+   and ships **LLVM 19 natively**, so we install `clang-19 lld-19 libc++-19-dev libc++abi-19-dev
+   libunwind-19-dev libclang-rt-19-dev` straight from Debian (not via `apt.llvm.org/llvm.sh`). And
+   workerd does **not** declare `bazel`/`bazelisk` as a pnpm dependency, so we install
+   `@bazel/bazelisk` explicitly and call `bazel` directly (not `pnpm exec bazel`). `CC=/usr/bin/clang-19`.
+
+2. **Broken TypeScript migration at v1.20260623.1 → `noCheck` stopgap** (`tools/base.tsconfig.json`).
+   Upstream commit `5e2a624c5` bumped `typescript` to `6.0.2` + `@types/node` to `>=25.5.0` and set
+   `tsconfig ignoreDeprecations:"6.0"`, **without** landing the matching `src/node` node-compat fix —
+   so the node-compat TypeScript does not type-check against its own pinned deps (e.g. `http.AgentOptions`
+   has no `noDelay` in any `@types/node` 24/25/26). Upstream's remote cache serves prebuilt `src/node`,
+   so their CI never runs `tsc` fresh; a cold fork build does and fails. At the time this fork was cut,
+   `upstream/main` == our base, i.e. **there was no newer tag with the fix** (it is in upstream's future).
+   The stopgap is `"noCheck": true` in `tools/base.tsconfig.json`: every `ts_project` **transpiles** the
+   (working) code without the broken type gate. The emitted JS is correct; only type-checking is skipped.
+
+   **Remove `noCheck` when you rebase onto an upstream tag where the migration is complete.** Quick test
+   for "is it fixed yet": at the new tag, `git show <tag>:pnpm-lock.yaml | grep -A2 '  typescript:'`
+   should show a version consistent with `package.json` (i.e. `6.0.x`, not the stale `5.9.3`), and a
+   cold `bazel build //src/node:node@tsproject` should pass with `noCheck` removed.
+
+The `quarvo/Dockerfile` builds `//src/node:node@tsproject` **first** as a fast-fail: a deps/TS
+regression surfaces in ~minutes instead of after the ~3 h V8 compile.
+
 ## Releasing via GitHub Actions (public repo)
 
 The repo is public, so GitHub-hosted Actions minutes and a public GHCR package are free. The
