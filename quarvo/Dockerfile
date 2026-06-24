@@ -26,6 +26,11 @@ RUN echo "build:linux --repo_env=CC=/usr/bin/clang-19" >> .bazelrc
 # pnpm dependency, so install it explicitly rather than relying on `pnpm exec bazel`.
 RUN npm install -g pnpm@10.32.1 @bazel/bazelisk && pnpm install
 
+# Fast-fail the TypeScript type-check (//src/node) FIRST: it is cheap (~minutes, no V8) and is the
+# step most sensitive to the typescript / @types/node versions, so a dependency regression surfaces
+# here in minutes instead of after the ~3h V8 compile. The result is cached for the full build below.
+RUN bazel build //src/node:node@tsproject
+
 # The release config produces an optimized, statically-linked binary (upstream ships it FROM
 # scratch), so the runtime stage below needs no extra libraries.
 RUN bazel build --config=release_linux //src/workerd/server:workerd \
