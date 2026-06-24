@@ -22,11 +22,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY . .
 RUN echo "build:linux --repo_env=CC=/usr/bin/clang-19" >> .bazelrc
 
-RUN npm install -g pnpm@10.32.1 && pnpm install
+# bazelisk provides the `bazel` command and honors .bazelversion. workerd does not declare it as a
+# pnpm dependency, so install it explicitly rather than relying on `pnpm exec bazel`.
+RUN npm install -g pnpm@10.32.1 @bazel/bazelisk && pnpm install
 
 # The release config produces an optimized, statically-linked binary (upstream ships it FROM
 # scratch), so the runtime stage below needs no extra libraries.
-RUN pnpm exec bazel build --config=release_linux //src/workerd/server:workerd \
+RUN bazel build --config=release_linux //src/workerd/server:workerd \
     && cp bazel-bin/src/workerd/server/workerd /workerd-bin
 
 FROM debian:trixie-slim
