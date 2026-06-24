@@ -105,4 +105,40 @@ bazel test //src/workerd/api/tests:worker-loader-memory-test \
            //src/workerd/api/tests:worker-loader-test
 ```
 
+## Releasing via GitHub Actions (public repo)
+
+The repo is public, so GitHub-hosted Actions minutes and a public GHCR package are free. The
+`.github/workflows/quarvo-release.yml` workflow builds `quarvo/Dockerfile` and pushes
+`ghcr.io/<owner>/quarvo-workerd:<version>`.
+
+1. **Land the workflow on the default branch.** `workflow_dispatch` only appears, and tag triggers
+   only fire, when the workflow file exists on the repo's default branch. Merge the
+   `quarvo/limit-enforcement` branch (which contains the workflow) into your default branch first.
+
+2. **Pick a runner** (edit `runs-on:` in the workflow). A cold V8 build is heavy — upstream uses a
+   16-core runner. For a public repo:
+   - Free first attempt: leave `ubuntu-latest`; the workflow's disk-reclaim step frees ~25-30 GB so
+     it usually fits, but expect ~1 h+ and possible RAM pressure.
+   - Reliable/fast: switch to a larger runner your org enables (e.g. `ubuntu-22.04-16core`) or a
+     self-hosted runner (`runs-on: [self-hosted, linux, X64]`) on a ≥8-core / ≥32 GB / ≥60 GB host.
+
+3. **Permissions.** The workflow already sets `permissions: packages: write` and logs in to GHCR
+   with the automatic `GITHUB_TOKEN` — no secrets needed. (Settings → Actions → General → Workflow
+   permissions should allow read/write, or rely on the per-job block.)
+
+4. **Trigger a build** either way:
+   - Tag: `git tag v1.20260623.1-quarvo.1 && git push origin v1.20260623.1-quarvo.1`
+   - Manual: Actions tab → "quarvo-release" → Run workflow → enter the version.
+
+5. **Make the package public + linked.** After the first push, open the org's Packages →
+   `quarvo-workerd` → Package settings → set visibility **Public** and link it to this repo, so
+   quarvo can `COPY --from=ghcr.io/...` without auth.
+
+6. **Verify:** `docker run --rm ghcr.io/<owner>/quarvo-workerd:<version> --version`, then a smoke
+   test loading a worker with `limits:{ memoryMB: 64 }` (see worker-loader-memory-test.js).
+
+Subsequent releases on the same runner are faster if you add a persistent Bazel disk cache
+(`actions/cache` on the bazel disk-cache dir); the current Docker-based workflow rebuilds cold each
+release, which is fine for periodic tag releases.
+
 See `quarvo/INTEGRATION.md` for how the quarvo runtime consumes the published artifact.

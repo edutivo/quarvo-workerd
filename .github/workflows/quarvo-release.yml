@@ -1,12 +1,16 @@
 # Builds the quarvo-workerd OCI image (workerd + per-isolate limit-enforcement patch) and pushes it
 # to GHCR. quarvo pins an exact tag and COPYs the binary in its runner/Dockerfile.
 #
-# IMPORTANT — runner size: a *cold* vendored-V8 build needs far more than a standard GitHub-hosted
-# runner provides (standard ubuntu-latest is ~4 cores / 16 GB RAM / ~14 GB free disk, which is not
-# enough — see quarvo/MAINTENANCE.md). Use a LARGER runner: a bigger GitHub-hosted runner label
-# (e.g. an org `ubuntu-latest-16-core`), a self-hosted runner, or a third-party large runner, AND a
-# persistent Bazel disk cache so only the first build pays full cost. The `Free disk space` step
-# below reclaims a few GB on standard runners but does not make a cold build fit on its own.
+# IMPORTANT — runner size. A *cold* vendored-V8 build is heavy. For reference, upstream workerd's own
+# CI builds on `ubuntu-22.04-16core` (a 16-core larger runner) with a Bazel disk cache AND a private
+# remote cache; standard `ubuntu-latest` (4 cores / 16 GB RAM / ~14 GB disk) is used only for light
+# jobs. A fork has no access to that remote cache, so the first build is fully cold.
+#   * Public repo? GitHub-hosted minutes are free, so trying `ubuntu-latest` first costs nothing —
+#     the "Reclaim disk space" step below frees ~25-30 GB, which usually makes it FIT on disk, but
+#     expect a slow (~1 h+) build and possible RAM pressure during the V8 link.
+#   * For reliable/fast builds, switch `runs-on:` to a LARGER runner your org has enabled (e.g.
+#     `ubuntu-22.04-16core`) or a self-hosted runner on a >=8-core / >=32 GB / >=60 GB-disk host.
+# See quarvo/MAINTENANCE.md.
 name: quarvo-release
 
 on:
