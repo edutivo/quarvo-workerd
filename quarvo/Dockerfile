@@ -12,19 +12,15 @@
 FROM node:trixie AS builder
 WORKDIR /workerd
 
+# Debian trixie (node:trixie) ships LLVM 19 natively (clang-19 19.1.7), so install it straight from
+# the distro repos. No apt.llvm.org PPA / software-properties-common (that package is not in trixie,
+# and was the original cause of the build failing at this step).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl dpkg-dev git lsb-release wget software-properties-common gnupg tcl
-
-# clang/lld/libc++ 19, matching upstream Dockerfile.release.
-RUN wget https://apt.llvm.org/llvm.sh \
-    && sed -i '/apt-get install/d' llvm.sh \
-    && chmod +x llvm.sh \
-    && ./llvm.sh 19
-RUN apt-get install -y --no-install-recommends \
-      clang-19 lld-19 libunwind-19 libc++abi1-19 libc++1-19 libc++-19-dev libclang-rt-19-dev
+      git python3 tcl dpkg-dev ca-certificates \
+      clang-19 lld-19 libc++-19-dev libc++abi-19-dev libunwind-19-dev libclang-rt-19-dev
 
 COPY . .
-RUN echo "build:linux --repo_env=CC=/usr/lib/llvm-19/bin/clang" >> .bazelrc
+RUN echo "build:linux --repo_env=CC=/usr/bin/clang-19" >> .bazelrc
 
 RUN npm install -g pnpm@10.32.1 && pnpm install
 
