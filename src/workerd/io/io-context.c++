@@ -1428,6 +1428,18 @@ void IoContext::runImpl(Runnable& runnable,
         // Check if we hit a limit.
         limitEnforcer->requireLimitsNotExceeded();
 
+        // quarvo: a dynamically-loaded Worker may have hit its per-isolate memory cap, in which
+        // case QuarvoIsolateLimitEnforcer's near-heap-limit callback called TerminateExecution().
+        // The per-request `limitEnforcer` above is a no-op for these (and all OSS) workers, so we
+        // detect the memory case here via the isolate-level enforcer and surface a clean,
+        // attributable error rather than falling through to the "script terminated for unknown
+        // reasons" assertion below.
+        if (worker->getIsolate().getLimitEnforcer().hasExcessivelyExceededHeapLimit()) {
+          auto e = JSG_KJ_EXCEPTION(OVERLOADED, Error, "Worker exceeded memory limit.");
+          e.setDetail(MEMORY_LIMIT_DETAIL_ID, kj::heapArray<kj::byte>(0));
+          kj::throwFatalException(kj::mv(e));
+        }
+
         // Check if we were aborted. TerminateExecution() may be called after abort() in order
         // to prevent any more JavaScript from executing.
         KJ_IF_SOME(e, abortException) {
