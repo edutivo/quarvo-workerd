@@ -64,13 +64,20 @@ The first release matches quarvo's pinned upstream tag (`v1.20260623.1`) so **on
 changes** are introduced. quarvo's `runner/Dockerfile` swaps its stock install for the fork. Two
 supported shapes (pick one — see the open decisions in the project notes):
 
-**A. OCI image (simplest for a self-hosted runtime).** Publish an image that contains the built
-binary, then in `runner/Dockerfile`:
+**A. OCI image (this is the chosen distribution).** `quarvo/Dockerfile` builds the patched workerd
+and produces an image with the (statically-linked) binary at `/usr/local/bin/workerd`. The
+`.github/workflows/quarvo-release.yml` workflow builds it and pushes to
+`ghcr.io/edutivo/quarvo-workerd:<upstreamTag>-quarvo.N` (e.g. `1.20260623.1-quarvo.1`). quarvo's
+`runner/Dockerfile` then swaps its install:
 
 ```dockerfile
 # was: RUN npm i -g workerd@1.20260623.1
-COPY --from=ghcr.io/edutivo/quarvo-workerd:1.20260623.1-quarvo.1 /workerd /usr/local/bin/workerd
+COPY --from=ghcr.io/edutivo/quarvo-workerd:1.20260623.1-quarvo.1 \
+     /usr/local/bin/workerd /usr/local/bin/workerd
 ```
+
+The image is also directly runnable (`ENTRYPOINT ["/usr/local/bin/workerd"]`) if quarvo prefers to
+base its runner on it instead of copying the binary.
 
 **B. Scoped npm package** (mirrors the upstream `workerd` meta-package + platform binary packages):
 
