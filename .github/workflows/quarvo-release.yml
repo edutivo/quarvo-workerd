@@ -42,6 +42,15 @@ on:
     tags:
       - "v*-quarvo.*"
 
+# Never run two builds for the same ref at once. cancel-in-progress: false leaves an in-flight build
+# to FINISH (so a cache-warm run completes and SAVES the cache instead of being killed); newer pushes
+# to the same ref queue and supersede each other (only the latest pending survives), so duplicate ~3h
+# cold builds don't pile up. Per-ref grouping: cache-warm runs on quarvo-main serialize with each
+# other, while each release tag is its own group and runs independently.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   packages: write
