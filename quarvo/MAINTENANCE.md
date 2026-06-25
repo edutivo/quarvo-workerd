@@ -180,19 +180,41 @@ the build does no SCM/timestamp stamping. (Note: the workerd source does **not**
 `__DATE__`/`__TIME__` — `grep -rn __DATE__ .bazelrc build/` is empty — so don't rely on that; the
 caching wins come from the action-hash + source-version properties above.)
 
-How it fits together (see the comments in `.github/workflows/quarvo-release.yml` and
+### Ref-scoping: why the workflow runs on `quarvo-main`, not just on tags
+
+GitHub scopes the Actions cache **per ref**. A run can restore caches created in **its own ref** or
+the **default branch** — nothing else. Every release is a **new `v*-quarvo.*` tag = a new ref**, so a
+previous release's cache is *invisible* to the next release (we verified this the hard way: a build on
+tag `…quarvo.2` saved a cache scoped to that tag's ref, and a build on a different tag missed it and
+rebuilt cold). The only ref every release can read is the **default branch (`quarvo-main`)**.
+
+So the workflow triggers on **both** tags **and** pushes to `quarvo-main`:
+
+- **Push to `quarvo-main` = cache-warm run.** Builds and **saves** the disk cache under the
+  default-branch scope. Publishes nothing (the image-push + `merge` are gated off via `IS_RELEASE`).
+- **Tag push / manual dispatch = release run.** **Restores** the default-branch cache (warm), builds,
+  pushes the image by digest, assembles the manifest. It does **not** save (saving under a tag ref
+  would be useless and would burn the 10 GB budget).
+
+**Operational flow: merge to `quarvo-main` (warms the cache) → tag the release (runs warm → fast).**
+The first `quarvo-main` build after a V8-affecting change is cold (~3 h); subsequent ones — and the
+releases that follow — are minutes. (A manual `workflow_dispatch` on `quarvo-main` both publishes
+*and* refreshes the cache, since it runs on the default-branch ref.)
+
+How a single run fits together (see the comments in `.github/workflows/quarvo-release.yml` and
 `quarvo/Dockerfile`):
 
-1. **`actions/cache/restore`** pulls the per-arch disk cache into `~/bazel-disk-cache`.
+1. **`actions/cache/restore`** pulls the per-arch disk cache into `~/bazel-disk-cache` (from this
+   ref or, for a tag release, from the `quarvo-main` scope).
 2. The **`export` target** of `quarvo/Dockerfile` runs the heavy compile inside the validated
    `node:trixie` builder, seeding `--disk_cache` from that directory (passed in as the
    `bazelcache` build context) and emitting **both** the `workerd` binary **and** the updated disk
    cache to a local dir via `--output type=local`.
-3. The thin **`quarvo/Dockerfile.runtime`** is built from that extracted binary and pushed by digest
-   — so the expensive compile runs **exactly once** per build. The `merge` job is unchanged.
-4. **`actions/cache/save`** persists the updated cache, but only on a cold miss (exact-key entries
-   are immutable) and only if the build succeeded (split restore/save so a broken build can't poison
-   the key with a partial/empty cache).
+3. *(release runs only)* The thin **`quarvo/Dockerfile.runtime`** is built from that extracted binary
+   and pushed by digest — so the expensive compile runs **exactly once** per build.
+4. **`actions/cache/save`** persists the updated cache **only on `quarvo-main`**, only on a cold miss
+   (exact-key entries are immutable), and only if the build succeeded (split restore/save so a broken
+   build can't poison the key with a partial/empty cache).
 
 Key design points / knobs:
 
@@ -210,12 +232,12 @@ Key design points / knobs:
   a per-file filter, not a total-size cap, and there are TWO caches (amd64 + arm64) competing for the
   one repo budget.** If their combined trimmed size exceeds the budget, GitHub silently evicts the
   least-recently-used entry — so a later run's restore can MISS and eat a full cold build for that
-  arch. This is graceful (the arches build in parallel, so worst case ≈ today's all-cold ~3 h wall
-  clock, and one arch is still warmed each run) but easy to mistake for a regression. The workflow logs
-  `du -sh` of the cache (and `df -h /`) on every run **precisely so you can measure** the real per-arch
-  size after the first cold build. If the pair doesn't comfortably fit the budget, lower the trim
-  threshold (e.g. `+50M`) or move to a remote cache (below). Also confirm the repo's actual cache cap —
-  GitHub raised it above 10 GB on some plans in late 2025; don't assume.
+  arch. **Measured (cold `-quarvo.2` build, both arches): ~1.5 GB on disk / ~293 MiB compressed per
+  arch → ~0.6 GB compressed for the pair, comfortably under 10 GB with plenty of headroom — no
+  eviction risk at this size.** The workflow logs `du -sh` of the cache (and `df -h /`) on every run so
+  you can re-check after a V8 bump. If it ever grows past the budget, lower the trim threshold (e.g.
+  `+50M`) or move to a remote cache (below). Also confirm the repo's actual cache cap — GitHub raised
+  it above 10 GB on some plans in late 2025; don't assume.
 - **No `cache-from/to: type=gha`.** Docker *layer* caching is the wrong level here — the whole
   compile is one `RUN` layer, busted by any source commit. The disk cache replaces it. (The few-minute
   toolchain setup — apt + `pnpm install` — does re-run each job since runners are ephemeral; that's
@@ -233,11 +255,18 @@ Key design points / knobs:
   now because a fork lockfile that's slightly out of sync would then hard-fail the build; revisit once
   the lockfile is known-consistent.
 
-**Verify the win:** trigger a cold build (`git tag -f v1.20260623.1-quarvo.1 <branch> && git push -f
-origin <tag>`) and note ~3 h (populates the cache). Then make a trivial change to one enforcement
-file (e.g. a comment in `src/workerd/server/server.c++`), re-tag, re-trigger → it should finish in
-**minutes**. Watch with `gh run watch <id> --repo edutivo/quarvo-workerd`. Confirm correctness still
-holds by pushing an `imgtest-*` tag to run `quarvo-image-test` on both arches.
+**Verify the win** (mind the ref-scoping — the cache only crosses runs via `quarvo-main`):
+
+1. Push the branch's build-relevant changes to **`quarvo-main`** → the cache-warm run goes cold (~3 h)
+   and saves the default-branch cache. (Watch with `gh run watch <id> --repo edutivo/quarvo-workerd`.)
+2. Push a fresh **release tag** cut from `quarvo-main` (`git tag v1.20260623.1-quarvo.N quarvo-main &&
+   git push origin <tag>`) → it should **restore** that cache and finish in **minutes**, recompiling
+   only what changed since the warm build + relinking. This is the real proof.
+3. Confirm correctness by pushing an `imgtest-*` tag to run `quarvo-image-test` on both arches.
+
+(To prove it *without* touching `quarvo-main`, you can instead re-run the **same** tag's workflow
+[`gh run rerun <id>`] — a re-run shares the ref, so it restores that ref's own cache and runs warm.
+That validates the mechanism but not the cross-release path, which needs the `quarvo-main` cache.)
 
 **Local `docker build` still works unchanged** (compiles cold, no disk cache):
 `docker build -f quarvo/Dockerfile -t ghcr.io/edutivo/quarvo-workerd:<tag> .`

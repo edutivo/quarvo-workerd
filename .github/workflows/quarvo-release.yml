@@ -15,6 +15,13 @@
 # by digest, so the expensive compile happens exactly once per build. See quarvo/MAINTENANCE.md
 # "CI build caching".
 #
+# WHY THIS RUNS ON quarvo-main TOO: GitHub scopes the Actions cache per ref. Each release is a new
+# `v*-quarvo.*` tag = a new ref, and a run can only restore caches from its own ref or the DEFAULT
+# branch — so a previous release's cache is invisible to the next one. To fix that, a push to
+# quarvo-main is a CACHE-WARM run: it builds and SAVES the disk cache under the default-branch scope
+# (publishing nothing). Tag releases then RESTORE that default-branch cache and run warm. Flow: merge
+# to quarvo-main (warms the cache) → tag the release (fast). The first quarvo-main build is cold.
+#
 # RUNNER SIZE: see quarvo/MAINTENANCE.md. The "Reclaim disk space" step frees ~25-30 GB so the
 # build fits on the standard hosted runners; for reliability/speed switch `runner:` to larger labels.
 name: quarvo-release
@@ -26,6 +33,12 @@ on:
         description: "Image tag, e.g. 1.20260623.1-quarvo.1 (upstream tag + -quarvo.N)"
         required: true
   push:
+    # Cache-warm runs. GitHub scopes the Actions cache PER REF: a release (each a distinct
+    # `v*-quarvo.*` tag = a distinct ref) can only restore caches from its own ref or the DEFAULT
+    # branch. So a push to quarvo-main builds and SAVES the Bazel disk cache under the default-branch
+    # scope; tag releases then RESTORE it (and skip saving). A quarvo-main push does NOT push an image.
+    branches:
+      - quarvo-main
     tags:
       - "v*-quarvo.*"
 
@@ -45,6 +58,10 @@ jobs:
           - { platform: linux/amd64, arch: amd64, runner: ubuntu-latest }
           - { platform: linux/arm64, arch: arm64, runner: ubuntu-24.04-arm }
     runs-on: ${{ matrix.runner }}
+    env:
+      # A RELEASE run (tag push or manual dispatch) publishes the image. A push to quarvo-main is a
+      # CACHE-WARM run: it builds + saves the default-branch-scoped cache but publishes nothing.
+      IS_RELEASE: ${{ github.event_name == 'workflow_dispatch' || github.ref_type == 'tag' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -96,7 +113,11 @@ jobs:
           docker buildx prune -af || true
           df -h / || true
 
+      # Everything below this point only runs for a RELEASE (tag push / manual dispatch). On a
+      # quarvo-main cache-warm run the steps above already built + (via the Save step) persisted the
+      # cache, which is the whole point; there is nothing to publish.
       - name: Log in to GHCR
+        if: env.IS_RELEASE == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -107,6 +128,7 @@ jobs:
       # by digest, exactly as before. The digest feeds the unchanged `merge` job's manifest.
       - name: Build and push thin runtime image by digest (${{ matrix.arch }})
         id: build
+        if: env.IS_RELEASE == 'true'
         run: |
           set -euxo pipefail
           # --provenance/--sbom=false: raw buildx attaches a provenance attestation by default, which
@@ -125,22 +147,26 @@ jobs:
           test -n "$digest" && test "$digest" != "null"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      # Persist the cache only on a cold MISS (exact-key entries are immutable) and only if the steps
-      # above succeeded (default `if: success()`), so a broken build never overwrites a good cache.
+      # Persist the cache ONLY when running on the default branch (refs/heads/quarvo-main) so it lands
+      # in the scope that tag releases can restore — saving under a tag's own ref would be useless and
+      # would burn the 10 GB repo budget. Also gated on a cold MISS (exact-key entries are immutable)
+      # and on success (default `if: success()`), so a broken build never overwrites a good cache.
       - name: Save Bazel disk cache
-        if: steps.bazel-cache.outputs.cache-hit != 'true'
+        if: github.ref == 'refs/heads/quarvo-main' && steps.bazel-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/bazel-disk-cache
           key: ${{ steps.bazel-cache.outputs.cache-primary-key }}
 
       - name: Export digest
+        if: env.IS_RELEASE == 'true'
         run: |
           mkdir -p /tmp/digests
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
+        if: env.IS_RELEASE == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: digest-${{ matrix.arch }}
@@ -150,6 +176,9 @@ jobs:
 
   merge:
     needs: build
+    # Only assemble + publish the multi-arch manifest for a RELEASE; a quarvo-main cache-warm run has
+    # no digests to merge (the build job skipped the push).
+    if: github.event_name == 'workflow_dispatch' || github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
       - name: Download digests
