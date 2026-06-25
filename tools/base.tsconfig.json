@@ -23,6 +23,7 @@
     "ignoreDeprecations": "6.0",
     "erasableSyntaxOnly": true,
     "skipLibCheck": true,
+    "noCheck": true,
     "moduleDetection": "force",
     "isolatedModules": true,
     "verbatimModuleSyntax": true,

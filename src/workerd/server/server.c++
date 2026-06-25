@@ -54,6 +54,7 @@
 #include <kj/glob-filter.h>
 #include <kj/map.h>
 
+#include <atomic>
 #include <cstdlib>
 #include <ctime>
 
@@ -2939,7 +2940,11 @@ class SequentialSpanSubmitter final: public SpanSubmitter {
 };
 
 // IsolateLimitEnforcer that enforces no limits.
-class NullIsolateLimitEnforcer final: public IsolateLimitEnforcer {
+//
+// NOTE(quarvo): no longer `final` so that QuarvoIsolateLimitEnforcer (below) can inherit its
+// no-op implementations of the many IsolateLimitEnforcer methods and override only the few that
+// matter for per-isolate memory enforcement.
+class NullIsolateLimitEnforcer: public IsolateLimitEnforcer {
  public:
   v8::Isolate::CreateParams getCreateParams() override {
     return {};
@@ -3008,6 +3013,123 @@ class NullIsolateLimitEnforcer final: public IsolateLimitEnforcer {
 
  private:
   TrackedWasmInstanceList trackedWasmInstances;
+};
+
+// IsolateLimitEnforcer that enforces a per-isolate JavaScript heap (memory) cap for
+// dynamically-loaded Workers (those created via the Worker Loader binding). The cap comes from
+// `WorkerCode.limits.memoryMB` (see ResourceLimits in io/io-channels.h), is plumbed through
+// WorkerDef::dynamicMemoryLimitMb, and applied here when the isolate is constructed.
+//
+// When `memoryMb` is null this behaves *identically* to NullIsolateLimitEnforcer, so isolates
+// without a declared limit (including all statically-configured workers) are unaffected.
+//
+// Enforcement strategy (the well-known V8 "near-heap-limit" pattern, as used by Node.js):
+//   1. getCreateParams() caps the V8 old-generation heap via ResourceConstraints. This is what
+//      makes V8 invoke the near-heap-limit callback as the isolate approaches the cap.
+//   2. customizeIsolate() registers a near-heap-limit callback and asks V8 to automatically
+//      restore the original limit once heap usage falls back below threshold.
+//   3. When the callback fires, we set `memoryExceeded` and terminate the *currently executing
+//      request* (TerminateExecution) rather than letting V8 fatally OOM the whole process, and
+//      temporarily raise the limit so V8 does not OOM during the brief window before the stack
+//      unwinds. After the runaway request is torn down and its allocations are collected,
+//      AutomaticallyRestoreInitialHeapLimit() brings the cap back, leaving the (warm) isolate
+//      usable and still capped for the next request.
+//   4. IoContext::runImpl() (io/io-context.c++) consults hasExcessivelyExceededHeapLimit() on the
+//      synchronous termination path and turns the terminated request into a clean, attributable
+//      `OVERLOADED: Worker exceeded memory limit.` rejection (instead of falling through to the
+//      "script terminated for unknown reasons" assertion). completedRequest() then resets the flag
+//      so it reflects a *per-incident* condition rather than latching for the isolate's lifetime.
+//
+// Rationale for self-heal vs. discard: OSS workerd has no supervisor that discards an isolate based
+// on hasExcessivelyExceededHeapLimit(). Self-healing therefore enforces the cap robustly without
+// depending on a discard mechanism that does not exist here, while still preserving the
+// warm-isolate fleet (there is no idle eviction in self-hosted workerd).
+//
+// Residual fatal-OOM window (documented, not fully closed in Phase A): the near-heap-limit callback
+// + TerminateExecution only bounds *incrementally* growing heaps. A single JavaScript allocation
+// whose size alone exceeds the headroom we grant here (and what V8 will accommodate across its
+// internal GC/retry rounds) can still reach v8::V8::FatalProcessOutOfMemory -> abort() before
+// termination lands. We grant generous headroom below to make this window small, but operators
+// loading *untrusted* code should set conservative caps and not rely on this as a hard sandbox.
+// See quarvo/INTEGRATION.md.
+//
+// Caveat (shared cage): all isolates share a process-wide ~4 GiB pointer-compression cage, so this
+// cap is a per-isolate old-generation ceiling, not a hard address-space partition. It bounds an
+// individual isolate's JS heap and fails its over-limit requests cleanly; it does not isolate cage
+// address space between isolates. Note also that ArrayBuffer backing stores are tracked as external
+// memory, not in the old generation this cap governs, so very large ArrayBuffers are not bounded by
+// memoryMB.
+class QuarvoIsolateLimitEnforcer final: public NullIsolateLimitEnforcer {
+ public:
+  explicit QuarvoIsolateLimitEnforcer(kj::Maybe<uint32_t> memoryMb): memoryMb(memoryMb) {}
+
+  v8::Isolate::CreateParams getCreateParams() override {
+    v8::Isolate::CreateParams params;
+    KJ_IF_SOME(mb, memoryMb) {
+      size_t bytes = static_cast<size_t>(mb) << 20;
+      // The old-generation cap is the primary lever: V8's heap limit (and thus the near-heap-limit
+      // callback) tracks the old generation.
+      params.constraints.set_max_old_generation_size_in_bytes(bytes);
+      // Keep the young generation modest and proportional so it does not, on its own, blow well
+      // past the intended ceiling. V8 clamps this to its own internal minimum if it is too small.
+      params.constraints.set_max_young_generation_size_in_bytes(
+          kj::max(static_cast<size_t>(2u << 20), kj::min(bytes / 8, static_cast<size_t>(16u << 20))));
+    }
+    return params;
+  }
+
+  void customizeIsolate(v8::Isolate* isolate) override {
+    if (memoryMb != kj::none) {
+      // Stash the isolate so the (static, signal-style) near-heap-limit callback can terminate
+      // execution on it. This pointer is valid for the lifetime of the callback: the enforcer is
+      // owned by Worker::Isolate and is declared *before* `api` (which owns the v8 isolate), so the
+      // enforcer is destroyed *after* the isolate — the `data` pointer can never dangle, and we must
+      // NOT call RemoveNearHeapLimitCallback in a destructor (the isolate is already gone by then).
+      this->isolate = isolate;
+      isolate->AddNearHeapLimitCallback(&nearHeapLimitCallback, this);
+      // Once heap usage drops back below 50% of the cap after a GC, restore the original limit so a
+      // single runaway request does not permanently ratchet the ceiling upward.
+      isolate->AutomaticallyRestoreInitialHeapLimit(0.5);
+    }
+  }
+
+  bool hasExcessivelyExceededHeapLimit() const override {
+    return memoryExceeded.load(std::memory_order_relaxed);
+  }
+
+  // Clear the per-incident over-limit flag at the end of each request. This keeps the flag a
+  // signal about *this* request rather than a permanent latch, so the io/io-context.h GC-reject
+  // path does not misclassify later unrelated dropped promises on a self-healed warm isolate.
+  void completedRequest(kj::StringPtr id) const override {
+    memoryExceeded.store(false, std::memory_order_relaxed);
+  }
+
+ private:
+  kj::Maybe<uint32_t> memoryMb;
+  v8::Isolate* isolate = nullptr;
+  // Set from the near-heap-limit callback (isolate thread, during GC), read/reset elsewhere. A
+  // relaxed atomic is sufficient — we only need a flag, not ordering — and `mutable` because the
+  // read/reset accessors are const (IsolateLimitEnforcer's interface).
+  mutable std::atomic<bool> memoryExceeded{false};
+
+  // Invoked by V8 on the isolate thread, during GC, when the heap is about to exceed its limit.
+  // Must be allocation-free and re-entrant-safe. Returns the new (temporarily raised) heap limit.
+  static size_t nearHeapLimitCallback(void* data, size_t currentLimit, size_t initialLimit) {
+    auto& self = *reinterpret_cast<QuarvoIsolateLimitEnforcer*>(data);
+    self.memoryExceeded.store(true, std::memory_order_relaxed);
+    if (self.isolate != nullptr) {
+      // Asynchronously interrupt JS execution; V8 throws a non-catchable termination exception at
+      // the next opportunity, unwinding the runaway request's stack.
+      self.isolate->TerminateExecution();
+    }
+    // Grant generous headroom so V8 does not fatally OOM (which aborts the whole process) before
+    // TerminateExecution unwinds and frees the runaway allocations. We are tearing the request
+    // down, so temporary over-provisioning is fine; AutomaticallyRestoreInitialHeapLimit() restores
+    // the cap afterwards. Returning `currentLimit` unchanged risks a fatal OOM in the window before
+    // termination lands. (See the "residual fatal-OOM window" note above: a single allocation
+    // larger than this grant can still abort.)
+    return currentLimit * 2 + (static_cast<size_t>(256u) << 20);
+  }
 };
 
 }  // namespace
@@ -4481,6 +4603,12 @@ struct Server::WorkerDef {
   const kj::HashMap<kj::String, ActorConfig>& localActorConfigs;
   bool isDynamic;
 
+  // Per-isolate JavaScript heap cap (MiB) for a dynamically-loaded Worker, taken from
+  // `WorkerCode.limits.memoryMB`. None for statically-configured workers and for dynamic workers
+  // that declared no memory limit; in both cases the isolate is created with no cap (stock
+  // behavior). See QuarvoIsolateLimitEnforcer.
+  kj::Maybe<uint32_t> dynamicMemoryLimitMb;
+
   FutureSubrequestChannel globalOutbound;
   kj::Maybe<FutureSubrequestChannel> cacheApiOutbound;
   kj::Vector<FutureSubrequestChannel> subrequestChannels;
@@ -4727,12 +4855,22 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted, private kj::TaskSet:
         }
       });
 
+      // Pull the per-isolate memory cap (if any) out of the dynamic worker's declared limits so
+      // makeWorkerImpl can construct the isolate with a bounded heap. See QuarvoIsolateLimitEnforcer.
+      kj::Maybe<uint32_t> dynamicMemoryLimitMb;
+      KJ_IF_SOME(limits, source.limits) {
+        KJ_IF_SOME(mb, limits.memoryMB) {
+          dynamicMemoryLimitMb = mb;
+        }
+      }
+
       WorkerDef def{
         .featureFlags = source.compatibilityFlags,
         .source = kj::mv(source.source),
         .moduleFallback = kj::none,
         .localActorConfigs = EMPTY_ACTOR_CONFIGS,
         .isDynamic = true,
+        .dynamicMemoryLimitMb = dynamicMemoryLimitMb,
 
         // clang-format off
         .globalOutbound{
@@ -5052,7 +5190,11 @@ kj::Promise<kj::Own<Server::WorkerService>> Server::makeWorkerImpl(kj::StringPtr
 
   auto jsgobserver = kj::atomicRefcounted<JsgIsolateObserver>();
   auto observer = kj::atomicRefcounted<IsolateObserver>();
-  auto limitEnforcer = kj::refcounted<NullIsolateLimitEnforcer>();
+  // QuarvoIsolateLimitEnforcer applies the per-isolate memory cap declared in a dynamically-loaded
+  // Worker's `limits.memoryMB`. For statically-configured workers and dynamic workers without a
+  // declared limit, `dynamicMemoryLimitMb` is none and this behaves exactly like the old
+  // NullIsolateLimitEnforcer (no cap).
+  auto limitEnforcer = kj::refcounted<QuarvoIsolateLimitEnforcer>(def.dynamicMemoryLimitMb);
 
   // Create the FsMap that will be used to map known file system
   // roots to configurable locations.

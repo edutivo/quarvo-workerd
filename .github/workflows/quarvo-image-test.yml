@@ -1,0 +1,59 @@
+# Pulls the published quarvo-workerd OCI image and runs the per-isolate memory-enforcement test
+# (worker-loader-memory-test) against the ACTUAL shipped binary, on BOTH architectures natively
+# (amd64 on ubuntu-latest, arm64 on ubuntu-24.04-arm — each pulls the matching entry from the
+# multi-arch manifest). Uses the built-in GITHUB_TOKEN, which can read the repo's own (even private)
+# GHCR package, so this needs no public visibility or extra secrets. Trigger: push an `imgtest-*` tag.
+name: quarvo-image-test
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to test"
+        default: "1.20260623.1-quarvo.1"
+        required: true
+  push:
+    tags:
+      - "imgtest-*"
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  test-image:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-latest }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run memory-enforcement test against the published image (${{ matrix.arch }})
+        run: |
+          set -euxo pipefail
+          TAG="${{ github.event.inputs.image_tag || '1.20260623.1-quarvo.1' }}"
+          IMG="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/quarvo-workerd:${TAG}"
+          # docker pull resolves the multi-arch manifest to this runner's architecture.
+          docker pull "$IMG"
+          docker run --rm "$IMG" --version
+          echo "host arch: $(uname -m)"
+
+          mkdir -p "$RUNNER_TEMP/t"
+          cp src/workerd/api/tests/worker-loader-memory-test.wd-test "$RUNNER_TEMP/t/test.wd-test"
+          cp src/workerd/api/tests/worker-loader-memory-test.js "$RUNNER_TEMP/t/worker-loader-memory-test.js"
+
+          # `workerd test` runs the exported test() handlers (MEM-1/2/3, REG-1) and exits non-zero on
+          # any failed assertion — so a green job == the shipped binary enforces the memory cap.
+          docker run --rm -v "$RUNNER_TEMP/t:/t" -w /t "$IMG" \
+            test --predictable /t/test.wd-test --experimental --compat-date=2000-01-01

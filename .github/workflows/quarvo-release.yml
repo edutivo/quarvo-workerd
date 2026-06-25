@@ -1,0 +1,120 @@
+# Builds the quarvo-workerd OCI image (workerd + per-isolate limit-enforcement patch) for BOTH
+# linux/amd64 and linux/arm64 and pushes a single multi-arch manifest to GHCR, so one tag
+# (…:<version>) resolves to the right architecture automatically.
+#
+# Each arch is built NATIVELY (no QEMU): amd64 on ubuntu-latest, arm64 on GitHub's free
+# `ubuntu-24.04-arm` runner (public repos). A cold vendored-V8 build is ~3 h per arch; the two run
+# in parallel, so wall-clock is ~3 h. The `build` job's last Docker stage runs `workerd --version`,
+# so each arch's binary is smoke-tested during the build.
+#
+# RUNNER SIZE: see quarvo/MAINTENANCE.md. The "Reclaim disk space" step frees ~25-30 GB so the
+# build fits on the standard hosted runners; for reliability/speed switch `runner:` to larger labels.
+name: quarvo-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Image tag, e.g. 1.20260623.1-quarvo.1 (upstream tag + -quarvo.N)"
+        required: true
+  push:
+    tags:
+      - "v*-quarvo.*"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/edutivo/quarvo-workerd
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux/amd64, arch: amd64, runner: ubuntu-latest }
+          - { platform: linux/arm64, arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reclaim disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache || true
+          df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest (${{ matrix.arch }})
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: quarvo/Dockerfile
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute version
+        id: meta
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            v="${{ github.event.inputs.version }}"
+          else
+            v="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=${v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create multi-arch manifest
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            -t "${IMAGE}:${{ steps.meta.outputs.version }}" \
+            $(printf "${IMAGE}@sha256:%s " *)
+
+      - name: Inspect (confirm amd64 + arm64)
+        run: docker buildx imagetools inspect "${IMAGE}:${{ steps.meta.outputs.version }}"

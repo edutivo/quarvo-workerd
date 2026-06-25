@@ -444,10 +444,17 @@ struct ResourceLimits {
   jsg::Optional<uint32_t> cpuMs;
   jsg::Optional<uint32_t> subRequests;
 
-  JSG_STRUCT(cpuMs, subRequests);
+  // Per-isolate JavaScript heap cap, in MiB, for a dynamically-loaded Worker. When set, the
+  // isolate is created with a bounded V8 old-generation heap and a near-heap-limit callback that
+  // terminates the offending request (rather than crashing the process) if the cap is approached.
+  // When omitted, behavior is identical to stock workerd (no cap). See QuarvoIsolateLimitEnforcer
+  // in src/workerd/server/server.c++.
+  jsg::Optional<uint32_t> memoryMB;
+
+  JSG_STRUCT(cpuMs, subRequests, memoryMB);
 
   ResourceLimits clone() const {
-    return {cpuMs, subRequests};
+    return {cpuMs, subRequests, memoryMB};
   }
 };
 
