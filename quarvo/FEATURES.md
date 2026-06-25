@@ -16,7 +16,7 @@ should pass a limit only when the quant declares one.
 
 | Capability | OSS workerd | quarvo-workerd | Status |
 |---|---|---|---|
-| `memoryMB` per-isolate cap | accepted, ignored | **enforced** (self-heal on breach) | ✅ Shipped |
+| `memoryMB` per-isolate cap | accepted, ignored | **enforced** (cap re-arms after breach) | ✅ Shipped |
 | `cpuMs` per-request CPU cap | accepted, ignored | accepted, **not yet** enforced | 🚧 Planned (Phase B) |
 | `subRequests` cap | accepted, ignored | accepted, not enforced | ⛔ Not planned (egress is quarvo's allow-list) |
 | External / `ArrayBuffer` memory accounting | not counted | not counted by `memoryMB` | 🚧 Planned hardening |
@@ -62,8 +62,10 @@ Every capability below uses the same template so future features slot in identic
 
 - **Semantics on violation** — the offending **request** is terminated with a clean
   `"Worker has exceeded memory limit."` error and **the workerd process survives**. The warm isolate
-  self-heals (V8 restores the cap after the request's allocations are collected) and remains capped
-  for subsequent requests. This is a **soft per-isolate ceiling**: all isolates share one
+  re-arms the cap at the next request entry — the enforcer restores V8's heap limit explicitly
+  (rather than waiting for a full GC), so the per-request ceiling is **sustained** for subsequent
+  requests instead of drifting up after a breach. This is a **soft per-isolate ceiling**: all
+  isolates share one
   process-wide ~4 GiB pointer-compression cage, so the cap bounds an individual function's heap and
   fails its over-limit requests cleanly — it does **not** hard-partition address space between
   functions. (There is no idle-eviction in self-hosted workerd, which is why the design self-heals
@@ -82,8 +84,9 @@ Every capability below uses the same template so future features slot in identic
     Blob/buffering operation at 128 MB, but not aggregate ArrayBuffer use.)
 
 - **Verify / test** — `src/workerd/api/tests/worker-loader-memory-test.js` holds the canonical
-  assertions (MEM-1/2/3, REG-1). Quick smoke: load a worker with `limits:{ memoryMB: 64 }` that
-  allocates ~1 GiB and confirm the request fails while the runtime stays up.
+  assertions (MEM-1/2/3, REG-1, REARM-1 — the last asserts the cap re-arms after an eviction). Quick
+  smoke: load a worker with `limits:{ memoryMB: 64 }` that allocates ~1 GiB and confirm the request
+  fails while the runtime stays up.
 
 ---
 
