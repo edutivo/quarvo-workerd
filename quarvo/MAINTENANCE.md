@@ -5,6 +5,10 @@ per-isolate resource-limit enforcement** for workers loaded through the **Worker
 (`env.LOADER.get(name, getCode)`). Stock OSS workerd accepts a `limits` object on `WorkerCode` but
 ignores it; this fork makes it bite.
 
+> New here? Start at [README.md](README.md) for the doc map. For **what the fork exposes and how to
+> use it**, see [FEATURES.md](FEATURES.md); for **consuming/pinning** the artifact, see
+> [INTEGRATION.md](INTEGRATION.md). This doc is for **maintaining and rebasing** the fork.
+
 The goal is a **minimal, rebaseable patch series** on top of upstream release tags, so that the only
 difference between our published artifact and stock workerd at the same tag is the enforcement code.
 
