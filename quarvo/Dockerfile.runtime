@@ -1,0 +1,13 @@
+# Thin runtime image: wraps a PRE-BUILT workerd binary (no compile). quarvo-release.yml builds the
+# heavy `export` target of quarvo/Dockerfile once -- which emits `workerd-bin` (+ the updated Bazel
+# disk cache) to a local dir -- then builds THIS Dockerfile from that dir and pushes it by digest.
+# Splitting it this way means the expensive vendored-V8 compile runs exactly once per CI build.
+#
+# The build context is the export dir, so `workerd-bin` is the extracted binary. Kept byte-for-byte
+# equivalent to the `runtime` stage of quarvo/Dockerfile -- update both together.
+FROM debian:trixie-slim
+COPY workerd-bin /usr/local/bin/workerd
+# Fail the build early if the binary is not self-contained on a slim base (also smoke-tests the arch).
+RUN /usr/local/bin/workerd --version
+ENTRYPOINT ["/usr/local/bin/workerd"]
+CMD ["--help"]

@@ -3,9 +3,24 @@
 # (…:<version>) resolves to the right architecture automatically.
 #
 # Each arch is built NATIVELY (no QEMU): amd64 on ubuntu-latest, arm64 on GitHub's free
-# `ubuntu-24.04-arm` runner (public repos). A cold vendored-V8 build is ~3 h per arch; the two run
-# in parallel, so wall-clock is ~3 h. The `build` job's last Docker stage runs `workerd --version`,
-# so each arch's binary is smoke-tested during the build.
+# `ubuntu-24.04-arm` runner (public repos). The thin runtime image runs `workerd --version`, so each
+# arch's binary is smoke-tested during the build.
+#
+# FAST REBUILDS (Bazel disk cache): a cold vendored-V8 build is ~3 h per arch, but ~99% of the
+# ~8,500 build actions (V8/abseil/ICU/boringssl) are identical across our fork's commits. We persist
+# Bazel's --disk_cache across runs with actions/cache, so a rebuild that only touches the enforcement
+# C++ finishes in MINUTES (cache hits for V8; only the changed files recompile + relink). The heavy
+# compile runs inside quarvo/Dockerfile's `export` target, which emits the binary + the updated disk
+# cache to a local dir; the thin quarvo/Dockerfile.runtime is then built from that binary and pushed
+# by digest, so the expensive compile happens exactly once per build. See quarvo/MAINTENANCE.md
+# "CI build caching".
+#
+# WHY THIS RUNS ON quarvo-main TOO: GitHub scopes the Actions cache per ref. Each release is a new
+# `v*-quarvo.*` tag = a new ref, and a run can only restore caches from its own ref or the DEFAULT
+# branch — so a previous release's cache is invisible to the next one. To fix that, a push to
+# quarvo-main is a CACHE-WARM run: it builds and SAVES the disk cache under the default-branch scope
+# (publishing nothing). Tag releases then RESTORE that default-branch cache and run warm. Flow: merge
+# to quarvo-main (warms the cache) → tag the release (fast). The first quarvo-main build is cold.
 #
 # RUNNER SIZE: see quarvo/MAINTENANCE.md. The "Reclaim disk space" step frees ~25-30 GB so the
 # build fits on the standard hosted runners; for reliability/speed switch `runner:` to larger labels.
@@ -18,6 +33,12 @@ on:
         description: "Image tag, e.g. 1.20260623.1-quarvo.1 (upstream tag + -quarvo.N)"
         required: true
   push:
+    # Cache-warm runs. GitHub scopes the Actions cache PER REF: a release (each a distinct
+    # `v*-quarvo.*` tag = a distinct ref) can only restore caches from its own ref or the DEFAULT
+    # branch. So a push to quarvo-main builds and SAVES the Bazel disk cache under the default-branch
+    # scope; tag releases then RESTORE it (and skip saving). A quarvo-main push does NOT push an image.
+    branches:
+      - quarvo-main
     tags:
       - "v*-quarvo.*"
 
@@ -37,6 +58,10 @@ jobs:
           - { platform: linux/amd64, arch: amd64, runner: ubuntu-latest }
           - { platform: linux/arm64, arch: arm64, runner: ubuntu-24.04-arm }
     runs-on: ${{ matrix.runner }}
+    env:
+      # A RELEASE run (tag push or manual dispatch) publishes the image. A push to quarvo-main is a
+      # CACHE-WARM run: it builds + saves the default-branch-scoped cache but publishes nothing.
+      IS_RELEASE: ${{ github.event_name == 'workflow_dispatch' || github.ref_type == 'tag' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -47,31 +72,101 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      # Restore the per-arch Bazel disk cache. EXACT key, NO restore-keys: a prefix match would let
+      # the cache snowball in size across runs (see upstream .github/workflows/_bazel.yml). amd64 and
+      # arm64 action hashes differ, so they must never share an entry. quarvo/Dockerfile is in the
+      # hash so a toolchain/recipe change rotates the key (forces a fresh cache). Split restore/save
+      # (not the integrated cache) so a FAILED build can't poison the key with a partial/empty cache.
+      - name: Restore Bazel disk cache
+        id: bazel-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/bazel-disk-cache
+          key: bazel-disk-${{ matrix.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'MODULE.bazel', 'quarvo/Dockerfile') }}
+
+      - name: Build workerd + export updated Bazel cache (${{ matrix.arch }})
+        run: |
+          set -euxo pipefail
+          mkdir -p "$HOME/bazel-disk-cache"            # cold run: empty seed for --build-context
+          echo "Restored disk cache size:"; du -sh "$HOME/bazel-disk-cache" || true
+          rm -rf "$RUNNER_TEMP/out"
+          # Heavy compile inside the validated node:trixie builder, seeding --disk_cache from the
+          # restored cache and emitting the binary + updated (already-trimmed) cache to a local dir.
+          # Native arch (no --platform): runs on the matching matrix runner, so no QEMU.
+          docker buildx build \
+            --target export \
+            --build-context bazelcache="$HOME/bazel-disk-cache" \
+            --output type=local,dest="$RUNNER_TEMP/out" \
+            --file quarvo/Dockerfile \
+            .
+          # TIGHTEST DISK POINT: the heavy build keeps buildkit state AND this local export
+          # co-resident on '/'. An ENOSPC here surfaces as a confusing ~3h-in compile/link failure,
+          # so log the numbers to make it diagnosable. See MAINTENANCE.md "CI build caching" for the
+          # peak-disk reality + escape hatches (bigger runner / relocate to /mnt) if this ever trips.
+          echo "Disk after export build:"; df -h / || true
+          # Replace the restored cache with the freshly-built one so the save step persists it.
+          # Moving it out of $RUNNER_TEMP/out also keeps the thin runtime build context tiny.
+          rm -rf "$HOME/bazel-disk-cache"
+          mv "$RUNNER_TEMP/out/bazel-disk-cache" "$HOME/bazel-disk-cache"
+          echo "Disk cache size to persist:"; du -sh "$HOME/bazel-disk-cache" || true
+          # Reclaim the multi-GB buildkit layers before the thin build + cache tar.
+          docker buildx prune -af || true
+          df -h / || true
+
+      # Everything below this point only runs for a RELEASE (tag push / manual dispatch). On a
+      # quarvo-main cache-warm run the steps above already built + (via the Save step) persisted the
+      # cache, which is the whole point; there is nothing to publish.
       - name: Log in to GHCR
+        if: env.IS_RELEASE == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push by digest (${{ matrix.arch }})
+      # Build the thin runtime image from the already-compiled binary (no second compile) and push it
+      # by digest, exactly as before. The digest feeds the unchanged `merge` job's manifest.
+      - name: Build and push thin runtime image by digest (${{ matrix.arch }})
         id: build
-        uses: docker/build-push-action@v6
+        if: env.IS_RELEASE == 'true'
+        run: |
+          set -euxo pipefail
+          # --provenance/--sbom=false: raw buildx attaches a provenance attestation by default, which
+          # adds an `unknown/unknown` entry to a push-by-digest image and complicates the manifest the
+          # `merge` job assembles. Disabling it keeps the published image identical in shape to the
+          # previous build-push-action output (which defaulted attestations off).
+          docker buildx build \
+            --file quarvo/Dockerfile.runtime \
+            --platform "${{ matrix.platform }}" \
+            --provenance=false \
+            --sbom=false \
+            --output "type=image,name=${IMAGE},push-by-digest=true,name-canonical=true,push=true" \
+            --metadata-file "$RUNNER_TEMP/runtime-meta.json" \
+            "$RUNNER_TEMP/out"
+          digest="$(jq -r '.["containerimage.digest"]' "$RUNNER_TEMP/runtime-meta.json")"
+          test -n "$digest" && test "$digest" != "null"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # Persist the cache ONLY when running on the default branch (refs/heads/quarvo-main) so it lands
+      # in the scope that tag releases can restore — saving under a tag's own ref would be useless and
+      # would burn the 10 GB repo budget. Also gated on a cold MISS (exact-key entries are immutable)
+      # and on success (default `if: success()`), so a broken build never overwrites a good cache.
+      - name: Save Bazel disk cache
+        if: github.ref == 'refs/heads/quarvo-main' && steps.bazel-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
         with:
-          context: .
-          file: quarvo/Dockerfile
-          platforms: ${{ matrix.platform }}
-          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=${{ matrix.arch }}
-          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
+          path: ~/bazel-disk-cache
+          key: ${{ steps.bazel-cache.outputs.cache-primary-key }}
 
       - name: Export digest
+        if: env.IS_RELEASE == 'true'
         run: |
           mkdir -p /tmp/digests
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
+        if: env.IS_RELEASE == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: digest-${{ matrix.arch }}
@@ -81,6 +176,9 @@ jobs:
 
   merge:
     needs: build
+    # Only assemble + publish the multi-arch manifest for a RELEASE; a quarvo-main cache-warm run has
+    # no digests to merge (the build job skipped the push).
+    if: github.event_name == 'workflow_dispatch' || github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
       - name: Download digests
