@@ -1,5 +1,9 @@
 # How quarvo consumes quarvo-workerd
 
+This doc is the **consumption contract**: the JS-visible `limits` API, how to pin/swap the published
+artifact, and how to verify the swap. For **what each limit does and what is/isn't enforced**, see
+[FEATURES.md](FEATURES.md); for fork internals and the rebase seams, see [MAINTENANCE.md](MAINTENANCE.md).
+
 ## Contract (JS-visible API)
 
 quarvo's dispatcher builds a `WorkerCode` in its Worker Loader callback and sets `limits` from each
@@ -13,8 +17,8 @@ return {
   modules: { 'main.js': source },
   // ...
   limits: {
-    cpuMs: quant.spec.limits.cpuMs,       // Phase B (CPU watchdog) — see below
-    memoryMB: quant.spec.limits.memoryMB, // Phase A (enforced by this fork)
+    cpuMs: quant.spec.limits.cpuMs,       // accepted; not yet enforced — see FEATURES.md
+    memoryMB: quant.spec.limits.memoryMB, // enforced by this fork — see FEATURES.md
   },
 };
 ```
@@ -28,35 +32,11 @@ return {
 
 ## Enforcement behavior
 
-When a loaded worker exceeds its `memoryMB` cap, **the offending request is terminated with an
-error and the workerd process survives**; the warm isolate self-heals and remains capped for
-subsequent requests. This is a soft per-isolate ceiling (all isolates share one process-wide ~4 GiB
-pointer-compression cage), so it bounds an individual function's heap and fails its over-limit
-requests cleanly — it does not hard-partition address space between functions.
-
-`cpuMs` is **not yet enforced** by this fork (Phase B). quarvo's dispatcher already guarantees a
-wall-clock abort, so the gap is CPU-bound (not I/O-bound) runaways only. `subRequests` is likewise
-unenforced here (quarvo controls egress via its allow-list).
-
-### Known limitations of the memory cap (read before relying on it as a sandbox)
-
-The cap uses V8's near-heap-limit callback + `TerminateExecution`, which bounds **incrementally**
-growing heaps cleanly. Two residual gaps remain in Phase A:
-
-- **Single oversized allocation → possible fatal OOM.** A single JS allocation whose size alone
-  exceeds the headroom the enforcer grants (and what V8 accommodates across its GC/retry rounds)
-  can still reach `V8::FatalProcessOutOfMemory` → `abort()` **before** termination unwinds — taking
-  the whole process (and all co-resident isolates) down. The enforcer grants generous headroom to
-  make this window small, but it is not closed. Mitigate by setting **conservative caps** and not
-  exposing the loader to fully-untrusted code without additional process-level sandboxing.
-- **ArrayBuffer / external memory is not counted.** `memoryMB` caps the V8 **old generation**.
-  `ArrayBuffer`/`SharedArrayBuffer` backing stores are tracked as *external* memory, not old-gen, so
-  a worker can allocate large ArrayBuffers beyond `memoryMB`. (workerd separately caps a single
-  Blob/buffering operation at 128 MB, but not aggregate ArrayBuffer use.)
-
-Closing both fully requires deeper V8 integration (a custom fatal-error/OOM handler that tears down
-just the offending isolate, and external-memory accounting) — tracked as follow-up hardening, not in
-the Phase A scope.
+What each limit does, what happens on a breach, and the known limitations of the memory cap (read
+these before relying on it as a sandbox) now live in **[FEATURES.md](FEATURES.md)** — the single
+source of truth for behavior. In short: a `memoryMB` breach terminates the offending **request**,
+the process survives, and the warm isolate self-heals and stays capped; `cpuMs`/`subRequests` are
+**not** enforced by this fork. See [FEATURES.md](FEATURES.md) for the full semantics and gotchas.
 
 ## Distribution / pinning (drop-in swap)
 
