@@ -18,6 +18,9 @@
 //          — depends on GC timing).
 //   REG-1: a worker with NO declared limit is unaffected (an allocation that WOULD exceed a 64 MiB
 //          cap succeeds because there is no cap).
+//   REARM-1: after an over-cap eviction, the same warm isolate re-arms the cap — a *moderate*
+//          over-cap allocation (128 MiB, well below the headroom granted during the eviction but
+//          above the cap) is ALSO terminated, and the ceiling stays sustained across repeats.
 import assert from 'node:assert';
 
 // Each chunk is a FixedArray of 65536 tagged slots. workerd builds V8 with pointer compression
@@ -130,5 +133,49 @@ export let noLimitIsUncapped = {
 
     // ~96 MiB of live heap: this would exceed a 64 MiB cap, but there is none here.
     assert.strictEqual(await worker.getEntrypoint().allocate(96), chunksFor(96));
+  },
+};
+
+// REARM-1: after an over-cap eviction, the warm isolate re-arms the cap for subsequent requests.
+// The near-heap-limit callback raises V8's internal heap limit during an eviction (to avoid a fatal
+// process OOM); without re-arming, that raised ceiling would persist and later over-cap requests
+// would slip through. We verify the ceiling is *sustained*: a moderate over-cap allocation — far
+// below the granted headroom but above the cap — is still terminated, repeatedly, on the same isolate.
+export let memoryCapReArmsAfterEviction = {
+  async test(ctrl, env, ctx) {
+    let worker = env.loader.get('memoryCapReArms', () =>
+      makeCode({ limits: { memoryMB: 64 } })
+    );
+
+    const assertMemoryRejection = (promise) =>
+      assert.rejects(promise, (e) => {
+        assert.ok(e instanceof Error, `expected an Error, got ${typeof e}: ${e}`);
+        assert.doesNotMatch(
+          e.message,
+          /unknown reasons/i,
+          'over-limit termination was not attributed to the memory cap'
+        );
+        assert.match(e.message, /memory/i);
+        return true;
+      });
+
+    // Evict once: ~1 GiB into a 64 MiB cap is terminated cleanly. This raises V8's heap limit (the
+    // callback grants >=320 MiB of headroom to avoid a fatal OOM while the request unwinds).
+    await assertMemoryRejection(worker.getEntrypoint().allocate(1024));
+
+    // The isolate stays usable: an ordinary call and a within-cap allocation both succeed.
+    assert.strictEqual(await worker.getEntrypoint().ping(), 'pong');
+    assert.strictEqual(await worker.getEntrypoint().allocate(24), chunksFor(24));
+
+    // Re-arm invariant (discriminating check): a 128 MiB allocation is far below the >=320 MiB the
+    // callback granted during the eviction, but above the 64 MiB cap. If the cap re-armed it is
+    // terminated; if the ceiling were still raised, 128 MiB would succeed and this would FAIL.
+    await assertMemoryRejection(worker.getEntrypoint().allocate(128));
+
+    // Sustained: repeating the over-cap request keeps failing cleanly on the same warm isolate.
+    await assertMemoryRejection(worker.getEntrypoint().allocate(128));
+
+    // And the isolate is still usable afterward.
+    assert.strictEqual(await worker.getEntrypoint().ping(), 'pong');
   },
 };

@@ -3026,19 +3026,24 @@ class NullIsolateLimitEnforcer: public IsolateLimitEnforcer {
 // Enforcement strategy (the well-known V8 "near-heap-limit" pattern, as used by Node.js):
 //   1. getCreateParams() caps the V8 old-generation heap via ResourceConstraints. This is what
 //      makes V8 invoke the near-heap-limit callback as the isolate approaches the cap.
-//   2. customizeIsolate() registers a near-heap-limit callback and asks V8 to automatically
-//      restore the original limit once heap usage falls back below threshold.
-//   3. When the callback fires, we set `memoryExceeded` and terminate the *currently executing
-//      request* (TerminateExecution) rather than letting V8 fatally OOM the whole process, and
-//      temporarily raise the limit so V8 does not OOM during the brief window before the stack
-//      unwinds. After the runaway request is torn down and its allocations are collected,
-//      AutomaticallyRestoreInitialHeapLimit() brings the cap back, leaving the (warm) isolate
-//      usable and still capped for the next request.
-//   4. IoContext::runImpl() (io/io-context.c++) consults hasExcessivelyExceededHeapLimit() on the
+//   2. customizeIsolate() registers a near-heap-limit callback. AutomaticallyRestoreInitialHeapLimit
+//      is also set as a backstop, but the primary restore is the explicit re-arm in step 4 (V8's
+//      automatic restore only fires during a full GC with live heap < 50% of the cap, so it can
+//      never run on an idle warm isolate).
+//   3. When the callback fires, we set `memoryExceeded` + `rearmPending` and terminate the
+//      *currently executing request* (TerminateExecution) rather than letting V8 fatally OOM the
+//      whole process, and temporarily raise the limit by an additive, non-compounding amount so V8
+//      does not OOM during the brief window before the stack unwinds.
+//   4. reArmIfNeeded(), called at the next JS entry while the isolate lock is held, restores the cap
+//      explicitly (RemoveNearHeapLimitCallback + re-add) when `rearmPending` is set, so the
+//      per-request ceiling stays *sustained* across requests on a warm isolate rather than drifting
+//      up after an eviction.
+//   5. IoContext::runImpl() (io/io-context.c++) consults hasExcessivelyExceededHeapLimit() on the
 //      synchronous termination path and turns the terminated request into a clean, attributable
 //      `OVERLOADED: Worker exceeded memory limit.` rejection (instead of falling through to the
-//      "script terminated for unknown reasons" assertion). completedRequest() then resets the flag
-//      so it reflects a *per-incident* condition rather than latching for the isolate's lifetime.
+//      "script terminated for unknown reasons" assertion). completedRequest() then resets
+//      `memoryExceeded` so it reflects a *per-incident* condition rather than latching for the
+//      isolate's lifetime.
 //
 // Rationale for self-heal vs. discard: OSS workerd has no supervisor that discards an isolate based
 // on hasExcessivelyExceededHeapLimit(). Self-healing therefore enforces the cap robustly without
@@ -3104,6 +3109,31 @@ class QuarvoIsolateLimitEnforcer final: public NullIsolateLimitEnforcer {
     memoryExceeded.store(false, std::memory_order_relaxed);
   }
 
+  // Re-arm the per-isolate memory cap after an over-cap eviction. The near-heap-limit callback raises
+  // V8's old-generation limit (to avoid a fatal OOM while the runaway request unwinds) but never
+  // lowers it back; V8's AutomaticallyRestoreInitialHeapLimit only restores during a *full* GC with
+  // live heap below 50% of the cap, which may never happen on an idle warm isolate. So when an
+  // over-cap event is pending, restore the cap explicitly here, at the next JS entry, lock held.
+  //
+  // RemoveNearHeapLimitCallback(cb, capBytes) lowers the limit to max(capBytes, liveSize + 25%)
+  // without forcing a GC; re-adding keeps the cap armed for the next event. If the evicted request's
+  // garbage is not yet collected, liveSize is inflated and the limit lands slightly above the cap;
+  // the next over-cap allocation's own GC reclaims it and V8 snaps the limit back to the cap. The
+  // multiplicative ratchet is eliminated either way. The two V8 calls are back-to-back under the lock
+  // with no allocation between them, so no GC can run while the callback is momentarily detached.
+  void reArmIfNeeded(jsg::Lock&) const override {
+    // Hot path: one relaxed load. No pending eviction (or no cap) -> return immediately.
+    if (!rearmPending.load(std::memory_order_relaxed)) return;
+    rearmPending.store(false, std::memory_order_relaxed);
+    if (isolate == nullptr) return;
+    KJ_IF_SOME(mb, memoryMb) {
+      size_t capBytes = static_cast<size_t>(mb) << 20;
+      isolate->RemoveNearHeapLimitCallback(&nearHeapLimitCallback, capBytes);
+      isolate->AddNearHeapLimitCallback(
+          &nearHeapLimitCallback, const_cast<QuarvoIsolateLimitEnforcer*>(this));
+    }
+  }
+
  private:
   kj::Maybe<uint32_t> memoryMb;
   v8::Isolate* isolate = nullptr;
@@ -3112,23 +3142,35 @@ class QuarvoIsolateLimitEnforcer final: public NullIsolateLimitEnforcer {
   // read/reset accessors are const (IsolateLimitEnforcer's interface).
   mutable std::atomic<bool> memoryExceeded{false};
 
+  // Set alongside `memoryExceeded` when the near-heap-limit callback fires; cleared by reArmIfNeeded
+  // at the next JS entry once the cap has been restored. Unlike `memoryExceeded` (cleared every
+  // completedRequest so the io-context GC-reject path stays per-incident), this must survive the
+  // inter-request gap so the *next* request entry can re-arm the cap.
+  mutable std::atomic<bool> rearmPending{false};
+
   // Invoked by V8 on the isolate thread, during GC, when the heap is about to exceed its limit.
   // Must be allocation-free and re-entrant-safe. Returns the new (temporarily raised) heap limit.
   static size_t nearHeapLimitCallback(void* data, size_t currentLimit, size_t initialLimit) {
     auto& self = *reinterpret_cast<QuarvoIsolateLimitEnforcer*>(data);
     self.memoryExceeded.store(true, std::memory_order_relaxed);
+    self.rearmPending.store(true, std::memory_order_relaxed);
     if (self.isolate != nullptr) {
       // Asynchronously interrupt JS execution; V8 throws a non-catchable termination exception at
       // the next opportunity, unwinding the runaway request's stack.
       self.isolate->TerminateExecution();
     }
     // Grant generous headroom so V8 does not fatally OOM (which aborts the whole process) before
-    // TerminateExecution unwinds and frees the runaway allocations. We are tearing the request
-    // down, so temporary over-provisioning is fine; AutomaticallyRestoreInitialHeapLimit() restores
-    // the cap afterwards. Returning `currentLimit` unchanged risks a fatal OOM in the window before
-    // termination lands. (See the "residual fatal-OOM window" note above: a single allocation
-    // larger than this grant can still abort.)
-    return currentLimit * 2 + (static_cast<size_t>(256u) << 20);
+    // TerminateExecution unwinds and frees the runaway allocations. We are tearing the request down,
+    // so temporary over-provisioning is fine; reArmIfNeeded() restores the cap at the next JS entry
+    // (with AutomaticallyRestoreInitialHeapLimit as a backstop). Returning `currentLimit` unchanged
+    // risks a fatal OOM in the window before termination lands. (See the "residual fatal-OOM window"
+    // note above: a single allocation larger than this grant can still abort.)
+    //
+    // Additive (not multiplicative) headroom: grow by a fixed amount per fire rather than doubling,
+    // so repeated fires before a re-arm grow the ceiling linearly instead of compounding (a
+    // `currentLimit*2` grant ratchets multiplicatively across back-to-back over-cap events). V8
+    // passes the configured cap as `initialLimit`.
+    return currentLimit + kj::max(initialLimit, static_cast<size_t>(256u) << 20);
   }
 };
 

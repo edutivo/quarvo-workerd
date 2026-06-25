@@ -1325,6 +1325,14 @@ void IoContext::runImpl(Runnable& runnable,
 
     auto limiterScope = limitEnforcer->enterJs(workerLock, *this);
 
+    // quarvo: re-arm the per-isolate memory cap if a prior request on this warm isolate was evicted
+    // for exceeding it. QuarvoIsolateLimitEnforcer's near-heap-limit callback raises V8's heap limit
+    // during an over-cap event (to avoid a fatal process OOM while the runaway request unwinds) but
+    // does not lower it back, so without this the cap can stay raised for the isolate's lifetime.
+    // Restoring here — lock held, before this request runs — keeps the per-request ceiling sustained.
+    // No-op (a single relaxed atomic load) for isolates without a memory cap or with no pending event.
+    worker->getIsolate().getLimitEnforcer().reArmIfNeeded(workerLock);
+
     bool gotTermination = false;
 
     KJ_DEFER({
