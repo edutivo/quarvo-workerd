@@ -111,6 +111,12 @@ class IsolateLimitEnforcer: public kj::Refcounted {
 
   virtual bool hasExcessivelyExceededHeapLimit() const = 0;
 
+  // Called at each JS entry, with the isolate lock held, on the isolate thread. Gives the enforcer a
+  // chance to re-establish per-isolate limits that a prior event may have relaxed — e.g. restoring a
+  // memory cap after V8's near-heap-limit callback raised the heap limit during an over-cap event.
+  // Default: no-op. Implementations must be cheap (it runs on the per-request hot path) and idempotent.
+  virtual void reArmIfNeeded(jsg::Lock&) const {}
+
   // Returns the TrackedWasmInstanceList for this isolate. Subclasses own the list and provide
   // it here. The returned object provides lock-guarded mutation methods and a read-only accessor
   // for signal-handler use.
