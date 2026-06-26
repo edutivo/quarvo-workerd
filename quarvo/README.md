@@ -23,6 +23,7 @@ loaded isolate is byte-for-byte equivalent to stock workerd at the same tag.
 | A quarvo developer **using** the fork's features | **[FEATURES.md](FEATURES.md)** | What differs from OSS workerd, how to use each capability, semantics, limitations, status |
 | **Wiring** the artifact into the quarvo runtime | **[INTEGRATION.md](INTEGRATION.md)** | The `WorkerCode.limits` contract, distribution/pinning (OCI / npm), the runner swap, verifying it |
 | **Maintaining / rebasing** the fork, or building & releasing it | **[MAINTENANCE.md](MAINTENANCE.md)** | What the fork changes, the seams to re-verify on rebase, build/test, CI caching |
+| Seeing **what changed** between fork updates | **[CHANGELOG.md](CHANGELOG.md)** | Timeline of quarvo-specific changes vs upstream, per release |
 
 ## Quick start (consumer)
 

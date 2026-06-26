@@ -17,6 +17,13 @@ Subdirectory `AGENTS.md` files provide component-specific context (key classes, 
 
 **workerd** is Cloudflare's JavaScript/WebAssembly server runtime that powers Cloudflare Workers. It's an open-source implementation of the same technology used in production at Cloudflare, designed for self-hosting applications, local development, and programmable HTTP proxy functionality.
 
+## quarvo fork
+
+This repository is the **quarvo-workerd** fork of upstream workerd — it adds real per-isolate
+resource-limit enforcement for Worker-Loader-loaded workers (see `quarvo/README.md`). When making
+fork-specific (`quarvo:`-prefixed) changes, read **`quarvo/AGENTS.md`** for local conventions, and —
+**required** — record every user-facing fork delta or release in **`quarvo/CHANGELOG.md`**.
+
 ## Build System & Commands
 
 ### Primary Build System: Bazel
