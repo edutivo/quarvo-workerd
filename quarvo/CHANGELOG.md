@@ -28,7 +28,7 @@ Categories: **Added** (new capability) · **Changed** (behavior change) · **Fix
   unfixed). Off by default — with the env vars unset, behavior is byte-identical to stock workerd.
   Covers every isolate the runtime creates: static workers (dispatcher, tail workers like
   `logtail`) and dynamic worker-loader isolates (quants) alike. See
-  [FEATURES.md](FEATURES.md#gc-under-memory-pressure-quarvo_gc_pressure). ([#N])
+  [FEATURES.md](FEATURES.md#gc-under-memory-pressure-quarvo_gc_pressure). ([#9])
 
 ### Internal
 - Added this `CHANGELOG.md` and `quarvo/AGENTS.md` (the latter requires keeping this changelog
@@ -93,6 +93,7 @@ First quarvo release.
 - A single allocation larger than the headroom the enforcer grants can still fatally OOM the process
   before the request is torn down; use conservative caps for untrusted code.
 
+[#9]: https://github.com/edutivo/quarvo-workerd/pull/9
 [#8]: https://github.com/edutivo/quarvo-workerd/pull/8
 [#6]: https://github.com/edutivo/quarvo-workerd/pull/6
 [#5]: https://github.com/edutivo/quarvo-workerd/pull/5
