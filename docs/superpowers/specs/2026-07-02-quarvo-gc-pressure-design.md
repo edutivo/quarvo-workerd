@@ -130,9 +130,13 @@ Fork-owned files (plus a BUILD.bazel entry) to keep the upstream-file diff minim
 - Owns the reclaim thread: started in the constructor, stopped via stop-flag +
   condvar, joined in the destructor (a GC in progress delays shutdown by at most
   one pause, tens of ms).
-- cgroup reader: `/sys/fs/cgroup/memory.current` and `memory.max` (cgroup v2
-  unified hierarchy — what k8s pods and docker containers expose, and the numbers
-  the OOM killer acts on). `memory.max == "max"` ⇒ the PCT threshold is inert.
+- cgroup reader: resolves the process's own cgroup v2 path from
+  `/proc/self/cgroup` (the `0::<path>` line), then reads
+  `/sys/fs/cgroup<path>/memory.current` and `memory.max`. In a container with a
+  private cgroup namespace (k8s pods, docker default) the path is `/`, i.e. the
+  container's own limit — the numbers the OOM killer acts on; on a bare host or CI
+  sandbox it resolves to the process's leaf cgroup, so the feature also works
+  outside containers. `memory.max == "max"` ⇒ the PCT threshold is inert.
   Files unreadable ⇒ warn once, thread exits (feature inert).
 
 ### 2. `Worker::Isolate::memoryPressureReclaim()` — small fork delta in worker.{h,c++}
