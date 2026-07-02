@@ -26,7 +26,7 @@ Categories: **Added** (new capability) · **Changed** (behavior change) · **Fix
 - CI now runs the quarvo bazel test targets on the warm disk cache for PRs to
   quarvo-main and quarvo-main pushes; the cache restore gained a `restore-keys` fallback so
   cache-key rotations no longer force a cold rebuild; release runs capture the multi-arch
-  **index digest** in the job summary/outputs for `@sha256:` pinning. (#N)
+  **index digest** in the job summary/outputs for `@sha256:` pinning. ([#8])
 
 ## [1.20260623.1-quarvo.3] — 2026-06-25
 
@@ -82,6 +82,7 @@ First quarvo release.
 - A single allocation larger than the headroom the enforcer grants can still fatally OOM the process
   before the request is torn down; use conservative caps for untrusted code.
 
+[#8]: https://github.com/edutivo/quarvo-workerd/pull/8
 [#6]: https://github.com/edutivo/quarvo-workerd/pull/6
 [#5]: https://github.com/edutivo/quarvo-workerd/pull/5
 [#4]: https://github.com/edutivo/quarvo-workerd/pull/4
