@@ -21,6 +21,7 @@ should pass a limit only when the quant declares one.
 | `subRequests` cap | accepted, ignored | accepted, not enforced | ⛔ Not planned (egress is quarvo's allow-list) |
 | External / `ArrayBuffer` memory accounting | not counted | not counted by `memoryMB` | 🚧 Planned hardening |
 | Per-isolate OOM containment (discard supervisor) | none | none — self-heal only | 🚧 Planned hardening |
+| Process-wide GC under memory pressure | none | **enforced (opt-in)** — `QUARVO_GC_PRESSURE=on` + threshold env vars | ✅ Shipped |
 
 ## How to read each entry
 
@@ -29,7 +30,9 @@ Every capability below uses the same template so future features slot in identic
 - **What it is** — one line.
 - **OSS workerd vs quarvo** — what stock does, what this fork does.
 - **How to use** — the exact API surface / config keys.
-- **Semantics on violation** — what happens when the limit is hit.
+- **Semantics on violation** — what happens when the limit is hit. (For capabilities where nothing
+  "violates" — e.g. GC under memory pressure — this heading is just **Semantics**: what the
+  mechanism does when it triggers.)
 - **Limitations & gotchas** — what it does *not* protect against.
 - **Verify / test** — where to confirm the behavior.
 
@@ -132,6 +135,98 @@ Every capability below uses the same template so future features slot in identic
   allow-list.
 
 - **Verify / test** — n/a (out of scope for this fork).
+
+---
+
+## GC under memory pressure (`QUARVO_GC_PRESSURE`)
+
+**Status: ✅ Shipped**
+
+- **What it is** — workerd's RSS ratchets up per request and never comes back (a fixed ~610 MiB
+  plateau, or an OOM-kill on tightly-limited pods): `jsg::Wrappable` garbage (Request, `new
+  URL()`, Response, per-invocation tail-worker events) lives on the cppgc/Oilpan heap, and only a
+  **major unified** GC sweeps it — but stock workerd never runs one under sustained load, because
+  it hardcodes `--noincremental-marking`, which disables V8's `MemoryReducer` (the automatic idle
+  major GC) at any request rate (upstream [workerd#6824](https://github.com/cloudflare/workerd/issues/6824),
+  open, unfixed). quarvo-workerd adds an embedder-side reclaimer: a background thread watches the
+  process's cgroup v2 memory usage and, past a threshold, takes each **idle** isolate's lock and
+  runs `MemoryPressureNotification(kCritical)` — a full V8+cppgc collection that returns freed
+  pages to the OS. Every isolate registered by `makeWorkerImpl` is covered: static workers
+  (dispatcher, tail workers like `logtail`) and dynamic worker-loader isolates (quants) alike.
+
+- **OSS workerd vs quarvo** — stock workerd has no such mechanism; RSS ratchets until the process
+  hits its internal heap limit or the pod's OOM killer acts. This fork adds an opt-in reclaimer
+  that keeps RSS sawtoothing around a configurable threshold, with no request-path cost: GCs run
+  on a dedicated background thread and only touch isolates with no request in flight or queued.
+
+- **How to use** — set the env vars on the workerd process (these are process-wide, not part of
+  `WorkerCode.limits` — see [INTEGRATION.md](INTEGRATION.md)):
+
+  | Env var | Default | Meaning |
+  |---|---|---|
+  | `QUARVO_GC_PRESSURE` | `off` | Master switch (`on`/`1`/`true`/`yes`, case-insensitive; anything else is off). Off is byte-identical to stock workerd — no thread, no registry. |
+  | `QUARVO_GC_PRESSURE_THRESHOLD_PCT` | `60` | Trigger when cgroup `memory.current` reaches this percent of `memory.max` (the container's memory **limit**). Range 1–100. Inert if `memory.max` is unlimited. |
+  | `QUARVO_GC_PRESSURE_THRESHOLD_MB` | unset | Absolute trigger in MiB, compared against `memory.current`. When both thresholds resolve, the **lower** byte value wins. Bounds-checked (≤ 2^30 MiB). This is also the **only** working knob when the cgroup has no `memory.max`. |
+  | `QUARVO_GC_PRESSURE_MIN_INTERVAL_MS` | `30000` | Floor between reclaim rounds, even if usage stays above threshold (thrash guard). Must be ≤ 24 h. |
+
+  The cgroup path is resolved from `/proc/self/cgroup` (the `0::` line), so this works both inside
+  containers and on bare cgroup-v2 hosts.
+
+  Kubernetes only exposes the **limit** in-pod; the **request** is a scheduler-side concept and
+  cannot be auto-detected. Feed it in via the Downward API so RSS sawtooths around the guaranteed
+  memory instead of the limit:
+
+  ```yaml
+  env:
+    - name: QUARVO_GC_PRESSURE
+      value: "on"
+    - name: QUARVO_GC_PRESSURE_THRESHOLD_MB
+      valueFrom:
+        resourceFieldRef:
+          resource: requests.memory
+          divisor: 1Mi
+  ```
+
+  On large or unlimited pods, set `_THRESHOLD_MB` directly (e.g. `256`) to cap idle memory use
+  outright.
+
+- **Semantics** — every second, the reclaimer reads `memory.current`/`memory.max` for the
+  process's own cgroup. Once usage is at or above the effective threshold **and** at least
+  `MIN_INTERVAL_MS` has elapsed since the last round, it runs a round: walk the registered
+  isolates, skip any with a request in flight or queued (`getCurrentLoad() > 0`), run a locked,
+  synchronous, critical GC on each idle one (serialized, never in parallel), re-reading usage
+  between isolates and stopping early once it drops back below threshold. Each round emits one
+  `KJ_LOG(INFO)` line — usage before/after and threshold in MiB, plus reclaimed/skipped/live
+  isolate counts — **visible only when workerd is run with `--verbose`**. On shutdown, the
+  reclaimer thread is joined in `~Server`; a round already in flight stops after at most one GC
+  pause.
+
+- **Limitations & gotchas** — read these before relying on this as a memory ceiling:
+  - **cgroup v2 only.** On any other setup (cgroup v1, no cgroup) the feature logs one warning
+    and stays inert for the life of the process.
+  - **Host cgroup namespace caveat.** With a *private* cgroup namespace (the container/K8s
+    default) the resolved path is the container's own root and always exists. With a *host*
+    cgroup namespace, the path read from `/proc/self/cgroup` may not exist under the container's
+    `/sys/fs/cgroup` mount; the reclaimer warns after 10 consecutive read failures rather than
+    failing silently.
+  - **Always-busy isolates are never reclaimed by this mechanism.** An isolate with a request
+    permanently in flight or queued is skipped every round (its own allocation-driven GCs still
+    run as normal).
+  - **A request arriving mid-GC waits out the pause.** Narrow window in practice: only idle
+    isolates are targeted, so a request has to race the reclaimer to land exactly during the GC.
+  - **`memory.current` includes page cache** — the threshold is evaluated "as the OOM killer sees
+    it", not as bare process RSS.
+  - **Does not shrink the warm-isolate working set** (~13 MiB/isolate of always-live state). That
+    needs idle-isolate eviction, a separate, out-of-scope feature.
+
+- **Verify / test** — unit tests for the env-var parsing and threshold logic
+  (`quarvo-gc-pressure-test@`); a churn `wd_test` variant of the memory-limit suite run with the
+  reclaimer forced on (`worker-loader-memory-gcpressure-test@`), proving `memoryMB` semantics
+  survive constant background unified GCs; and a container end-to-end test
+  (`quarvo/e2e/ratchet/run.sh`) that runs the published image: `off` runs uncapped and reproduces
+  the ratchet (800 requests, ≥80 MiB growth — a memory cap would just OOM-kill the reproduction);
+  `on` stays bounded in a 512 MiB-capped container (2500 requests, peak ≤260 MiB). Wired as the
+  dispatch-only `memory-ratchet` job in `quarvo-image-test.yml` (requires an image ≥ `quarvo.4`).
 
 ---
 

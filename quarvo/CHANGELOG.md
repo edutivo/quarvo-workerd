@@ -19,6 +19,17 @@ Categories: **Added** (new capability) · **Changed** (behavior change) · **Fix
 
 ## [Unreleased]
 
+### Added
+- **Opt-in GC under memory pressure** (`QUARVO_GC_PRESSURE` + `_THRESHOLD_PCT` / `_THRESHOLD_MB` /
+  `_MIN_INTERVAL_MS`): a background thread watches the process's cgroup v2 memory usage and runs a
+  full unified (V8+cppgc) GC on idle isolates once usage crosses the threshold, so long-running
+  runners hold a bounded sawtooth instead of ratcheting up to a ~610 MiB plateau or OOM-killing
+  tightly-limited pods (upstream [workerd#6824](https://github.com/cloudflare/workerd/issues/6824),
+  unfixed). Off by default — with the env vars unset, behavior is byte-identical to stock workerd.
+  Covers every isolate the runtime creates: static workers (dispatcher, tail workers like
+  `logtail`) and dynamic worker-loader isolates (quants) alike. See
+  [FEATURES.md](FEATURES.md#gc-under-memory-pressure-quarvo_gc_pressure). ([#N])
+
 ### Internal
 - Added this `CHANGELOG.md` and `quarvo/AGENTS.md` (the latter requires keeping this changelog
   current on every quarvo change / release); linked the changelog from `quarvo/README.md` and the
