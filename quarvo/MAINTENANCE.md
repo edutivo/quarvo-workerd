@@ -223,12 +223,15 @@ How a single run fits together (see the comments in `.github/workflows/quarvo-re
 Key design points / knobs:
 
 - **Cache key** — `bazel-disk-${arch}-${hashFiles('.bazelversion','.bazelrc','MODULE.bazel','quarvo/Dockerfile')}`.
-  **Exact key, no `restore-keys`**: a prefix match lets Bazel snowball the cache larger every run
-  (upstream `_bazel.yml` documents the same choice). **Per-arch** because amd64/arm64 action hashes
-  differ. `quarvo/Dockerfile` is in the hash so a toolchain/recipe change rotates the key — note the
-  flip side: a **comment-only edit to the Dockerfile also rotates the key and forces one cold ~3 h
-  rebuild**. That's an accepted trade for never serving a stale cache after a toolchain bump; the
-  Dockerfile changes rarely.
+  **Exact key preferred, with a `restore-keys` prefix fallback** (`bazel-disk-${arch}-`). A change to
+  a hashed file (e.g. any `quarvo/Dockerfile` edit, even comment-only) rotates the key; the fallback
+  then seeds the build from the newest previous cache instead of eating a ~3 h cold rebuild — Bazel
+  still re-validates every action against the new toolchain/recipe, so a stale entry costs a re-run,
+  not a wrong output. Snowballing (the reason upstream `_bazel.yml` avoids `restore-keys`) is bounded
+  here by the Dockerfile's >100 MB-entry trim and GitHub's 10 GB LRU eviction. **Per-arch** because
+  amd64/arm64 action hashes differ — the per-arch prefix keeps the arches from ever sharing an entry.
+  The **save path is unchanged: exact key, on `quarvo-main` only** — a prefix-fallback restore counts
+  as a miss, so the next `quarvo-main` run re-saves under the new key.
 - **10 GB GitHub cache budget is shared across the WHOLE repo (LRU), not per key.** `quarvo/Dockerfile`
   drops cache entries >100 MB (`find /bazel-disk-cache -size +100M -type f -delete`, GNU find) before
   export — keeping the many small action outputs (the bulk of hits) and dropping the few huge ones

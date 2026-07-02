@@ -23,6 +23,10 @@ Categories: **Added** (new capability) · **Changed** (behavior change) · **Fix
 - Added this `CHANGELOG.md` and `quarvo/AGENTS.md` (the latter requires keeping this changelog
   current on every quarvo change / release); linked the changelog from `quarvo/README.md` and the
   root `AGENTS.md`.
+- CI now runs the quarvo bazel test targets on the warm disk cache for PRs to
+  quarvo-main and quarvo-main pushes; the cache restore gained a `restore-keys` fallback so
+  cache-key rotations no longer force a cold rebuild; release runs capture the multi-arch
+  **index digest** in the job summary/outputs for `@sha256:` pinning. (#N)
 
 ## [1.20260623.1-quarvo.3] — 2026-06-25
 
