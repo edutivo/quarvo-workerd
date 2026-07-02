@@ -1,0 +1,23 @@
+# quarvo: the worker-loader memory-limit suite (MEM-1/2/3, REG-1, REARM-1) run with the
+# GC-pressure reclaimer forced permanently ON (THRESHOLD_MB=1 => every interval is a reclaim
+# round). Proves memoryMB enforcement and the runtime survive constant background unified GCs.
+# On hosts where no cgroup v2 hierarchy is visible the reclaimer is inert and this degrades to
+# a duplicate of worker-loader-memory-test — still a valid (weaker) pass; the container e2e
+# (quarvo/e2e/ratchet) is the authoritative feature-on validation.
+using Workerd = import "/workerd/workerd.capnp";
+
+const unitTests :Workerd.Config = (
+  services = [
+    ( name = "worker-loader-memory-gcpressure-test",
+      worker = (
+        modules = [
+          (name = "worker", esModule = embed "worker-loader-memory-test.js")
+        ],
+        compatibilityFlags = ["nodejs_compat", "experimental"],
+        bindings = [
+          (name = "loader", workerLoader = ()),
+        ],
+      )
+    ),
+  ],
+);

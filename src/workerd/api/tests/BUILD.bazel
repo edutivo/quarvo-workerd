@@ -989,6 +989,18 @@ wd_test(
 )
 
 wd_test(
+    size = "large",
+    src = "worker-loader-memory-gcpressure-test.wd-test",
+    args = ["--experimental"],
+    data = ["worker-loader-memory-test.js"],
+    env = {
+        "QUARVO_GC_PRESSURE": "on",
+        "QUARVO_GC_PRESSURE_THRESHOLD_MB": "1",
+        "QUARVO_GC_PRESSURE_MIN_INTERVAL_MS": "250",
+    },
+)
+
+wd_test(
     src = "worker-loader-unnamed-gc-test.wd-test",
     args = ["--experimental"],
     data = ["worker-loader-unnamed-gc-test.js"],
