@@ -19,6 +19,11 @@ Categories: **Added** (new capability) · **Changed** (behavior change) · **Fix
 
 ## [Unreleased]
 
+## [1.20260623.1-quarvo.4] — 2026-07-02
+
+**Upstream base:** workerd `v1.20260623.1` · **Image:** `…/quarvo-workerd:1.20260623.1-quarvo.4` ·
+**Index digest:** `sha256:c0d944e8ddbee08032e0e2a9e77ec8c5223a9ced490c3a12e3f9cd19da6070c5`
+
 ### Added
 - **Opt-in GC under memory pressure** (`QUARVO_GC_PRESSURE` + `_THRESHOLD_PCT` / `_THRESHOLD_MB` /
   `_MIN_INTERVAL_MS`): a background thread watches the process's cgroup v2 memory usage and runs a

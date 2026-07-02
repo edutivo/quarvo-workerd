@@ -60,12 +60,22 @@ supported shapes (pick one — see the open decisions in the project notes):
 **A. OCI image (this is the chosen distribution).** `quarvo/Dockerfile` builds the patched workerd
 and produces an image with the (statically-linked) binary at `/usr/local/bin/workerd`. The
 `.github/workflows/quarvo-release.yml` workflow builds it and pushes to
-`ghcr.io/edutivo/quarvo-workerd:<upstreamTag>-quarvo.N` (e.g. `1.20260623.1-quarvo.1`). quarvo's
-`runner/Dockerfile` then swaps its install:
+`ghcr.io/edutivo/quarvo-workerd:<upstreamTag>-quarvo.N`; the image is mirrored to
+`edutivo.azurecr.io/edutivo/quarvo-workerd` (ACR), which is what production pulls from. quarvo's
+`runner/Dockerfile` then swaps its install, pinning the release's multi-arch **index digest** (the
+release workflow emits it in the job summary/outputs) for an exact, immutable build:
 
 ```dockerfile
 # was: RUN npm i -g workerd@1.20260623.1
-COPY --from=ghcr.io/edutivo/quarvo-workerd:1.20260623.1-quarvo.1 \
+COPY --from=edutivo.azurecr.io/edutivo/quarvo-workerd@sha256:c0d944e8ddbee08032e0e2a9e77ec8c5223a9ced490c3a12e3f9cd19da6070c5 \
+     /usr/local/bin/workerd /usr/local/bin/workerd
+```
+
+The digest pin is exact; the tag (`:1.20260623.1-quarvo.4`) remains the readable alternative if you
+prefer legibility over immutability:
+
+```dockerfile
+COPY --from=edutivo.azurecr.io/edutivo/quarvo-workerd:1.20260623.1-quarvo.4 \
      /usr/local/bin/workerd /usr/local/bin/workerd
 ```
 
