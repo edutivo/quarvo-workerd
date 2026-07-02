@@ -6,6 +6,7 @@ set -euo pipefail
 
 IMG="${1:?usage: run.sh <image> <on|off>}"
 MODE="${2:?usage: run.sh <image> <on|off>}"
+case "$MODE" in on|off) ;; *) echo "FATAL: MODE must be 'on' or 'off'"; exit 2;; esac
 
 # OFF mode runs UNCAPPED and shorter: with a memory cap the ratchet would OOM-kill the
 # container mid-run (that's the production bug!). Growth measurement doesn't need a cap.
@@ -37,8 +38,9 @@ if [ "$MODE" = "on" ]; then
 fi
 
 # Register cleanup BEFORE docker run so an early failure still cleans up; the container may not
-# exist yet when the trap fires, so guard both commands.
-trap '{ docker logs "$NAME" 2>&1 | tail -50; docker rm -f "$NAME" >/dev/null; } || true' EXIT
+# exist yet when the trap fires, so guard both commands. $? at trap entry is the exiting
+# command's status: dump the container logs only on failure (quiet on success).
+trap '{ rc=$?; if [ "$rc" -ne 0 ]; then docker logs "$NAME" 2>&1 | tail -50; fi; docker rm -f "$NAME" >/dev/null; } || true' EXIT
 
 docker run -d --name "$NAME" -p 127.0.0.1:0:8080 \
   -v "$DIR:/app:ro" "${RUN_ARGS[@]}" \

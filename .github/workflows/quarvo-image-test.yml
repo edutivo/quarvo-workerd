@@ -9,8 +9,8 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Image tag to test"
-        default: "1.20260623.1-quarvo.1"
+        description: "Image tag to test (memory-ratchet requires >= 1.20260623.1-quarvo.4)"
+        default: "1.20260623.1-quarvo.4"
         required: true
   push:
     tags:
@@ -42,7 +42,7 @@ jobs:
       - name: Run memory-enforcement test against the published image (${{ matrix.arch }})
         run: |
           set -euxo pipefail
-          TAG="${{ github.event.inputs.image_tag || '1.20260623.1-quarvo.1' }}"
+          TAG="${{ github.event.inputs.image_tag || '1.20260623.1-quarvo.4' }}"
           IMG="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/quarvo-workerd:${TAG}"
           # docker pull resolves the multi-arch manifest to this runner's architecture.
           docker pull "$IMG"
@@ -77,7 +77,7 @@ jobs:
       - name: Ratchet e2e — off reproduces, on stays bounded
         run: |
           set -euxo pipefail
-          TAG="${{ github.event.inputs.image_tag || '1.20260623.1-quarvo.1' }}"
+          TAG="${{ github.event.inputs.image_tag || '1.20260623.1-quarvo.4' }}"
           IMG="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/quarvo-workerd:${TAG}"
           docker pull "$IMG"
           bash quarvo/e2e/ratchet/run.sh "$IMG" off

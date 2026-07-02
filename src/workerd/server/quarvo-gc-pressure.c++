@@ -173,6 +173,9 @@ QuarvoGcPressureReclaimer::~QuarvoGcPressureReclaimer() noexcept(false) {
 
 void QuarvoGcPressureReclaimer::registerIsolate(
     kj::Own<const Worker::Isolate::WeakIsolateRef> ref) {
+  // Inert (no cgroup v2): the reclaim thread has exited and nothing would ever prune the
+  // registry, so don't grow it.
+  if (cgroupDir == kj::none) return;
   registry.lockExclusive()->add(kj::mv(ref));
 }
 
