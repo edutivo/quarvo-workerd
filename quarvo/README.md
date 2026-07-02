@@ -15,6 +15,7 @@ loaded isolate is byte-for-byte equivalent to stock workerd at the same tag.
 | `memoryMB` — per-isolate memory cap | ✅ Shipped | [FEATURES.md](FEATURES.md#memorymb--per-isolate-memory-cap) |
 | `cpuMs` — per-request CPU cap | 🚧 Planned (Phase B) | [FEATURES.md](FEATURES.md#cpums--per-request-cpu-time-cap) |
 | `subRequests` — subrequest count cap | ⛔ Not planned (quarvo allow-list) | [FEATURES.md](FEATURES.md#subrequests--subrequest-count-cap) |
+| GC under memory pressure (`QUARVO_GC_PRESSURE`) | ✅ Shipped (opt-in) | [FEATURES.md](FEATURES.md#gc-under-memory-pressure-quarvo_gc_pressure) |
 
 ## Which doc do I read?
 

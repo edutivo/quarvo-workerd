@@ -62,7 +62,11 @@ permissions:
 env:
   IMAGE: ghcr.io/edutivo/quarvo-workerd
   # Extra/override test targets for the quarvo-test stage; empty = Dockerfile default list.
-  QUARVO_TEST_TARGETS: ""
+  QUARVO_TEST_TARGETS: >-
+    //src/workerd/server:quarvo-gc-pressure-test@
+    //src/workerd/api/tests:worker-loader-memory-test@
+    //src/workerd/api/tests:worker-loader-memory-gcpressure-test@
+    //src/workerd/api/tests:worker-loader-limits-test@
 
 jobs:
   build:

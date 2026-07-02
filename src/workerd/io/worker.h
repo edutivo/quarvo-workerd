@@ -439,6 +439,15 @@ class Worker::Isolate: public kj::AtomicRefcounted {
   // Returns a count that is incremented upon every successful lock.
   uint getLockSuccessCount() const;
 
+  // NOTE(quarvo): Synchronously takes this isolate's lock and runs a critical memory-pressure
+  // GC — a full unified (V8 + cppgc) collection that sweeps cppgc garbage and returns freed
+  // pages to the OS. Safe to call from any thread; the collection runs on the calling thread
+  // while it holds the lock (mirrors the inspector's foreign-thread locking pattern, e.g.
+  // attachInspector/TakeHeapSnapshot). Callers should prefer idle isolates (getCurrentLoad()
+  // == 0) since the pause blocks a request that arrives while it runs. Used by
+  // server/quarvo-gc-pressure.{h,c++}.
+  void memoryPressureReclaim() const;
+
   // Accepts a connection to the V8 inspector and handles requests until the client disconnects.
   // Also adds a special JSON value to the header identified by `controlHeaderId`, for compatibility
   // with internal Cloudflare systems.

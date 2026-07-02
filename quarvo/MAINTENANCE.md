@@ -21,7 +21,11 @@ difference between our published artifact and stock workerd at the same tag is t
 | Plumbing | `src/workerd/server/server.c++` (`Server::WorkerDef`) | Adds `kj::Maybe<uint32_t> dynamicMemoryLimitMb`. |
 | Plumbing | `src/workerd/server/server.c++` (`WorkerStubImpl::start`) | Reads `source.limits.memoryMB` → `def.dynamicMemoryLimitMb`. |
 | Plumbing | `src/workerd/server/server.c++` (`Server::makeWorkerImpl`) | Constructs `QuarvoIsolateLimitEnforcer(def.dynamicMemoryLimitMb)` instead of `NullIsolateLimitEnforcer`. |
-| Tests | `src/workerd/api/tests/worker-loader-memory-test.{js,wd-test}` + `BUILD.bazel` | Memory-cap enforcement test (MEM-1/2/3, REG-1). |
+| Tests | `src/workerd/api/tests/worker-loader-memory-test.{js,wd-test}` + `BUILD.bazel` | Memory-cap enforcement test (MEM-1/2/3, REG-1, REARM-1). |
+| GC pressure | `src/workerd/server/quarvo-gc-pressure.{h,c++}` + `quarvo-gc-pressure-test.c++` + `BUILD.bazel` | Fork-owned reclaimer: config parsing, cgroup v2 reader, `WeakIsolateRef` registry, reclaim thread (+ unit tests). See seam 6 below. |
+| GC pressure | `src/workerd/io/worker.{h,c++}` | Adds `Worker::Isolate::memoryPressureReclaim()` (synchronous locked critical GC). |
+| GC pressure | `src/workerd/server/server.{h,c++}` | `quarvoGcPressureReclaimer` member (declared last) + per-isolate registration in `makeWorkerImpl`. |
+| Tests | `src/workerd/api/tests/worker-loader-memory-gcpressure-test.wd-test` + `BUILD.bazel` | The memory-cap suite re-run with the reclaimer forced on (constant-churn variant). |
 
 No upstream behavior changes when a worker declares **no** limit: `dynamicMemoryLimitMb == kj::none`
 makes `QuarvoIsolateLimitEnforcer` byte-for-byte equivalent to `NullIsolateLimitEnforcer`.
@@ -47,6 +51,18 @@ inert/no-op impls, which is exactly the seam we fill:
 5. **`hasExcessivelyExceededHeapLimit()`** is consumed in `src/workerd/io/io-context.h` (the
    promise-GC-reject path) to produce a clean `"Worker has exceeded memory limit."` error. OSS has
    **no** supervisor that discards an isolate on this flag — hence the self-heal design (below).
+6. **GC-pressure reclaimer (fork feature):** `src/workerd/server/quarvo-gc-pressure.{h,c++}` are
+   fork-owned files (config parsing, the cgroup v2 reader, the `WeakIsolateRef` registry, and the
+   reclaim thread) — kept separate from upstream files to minimize the diff. The upstream touch
+   points are small: `Worker::Isolate::memoryPressureReclaim()` (`src/workerd/io/worker.{h,c++}`)
+   — a synchronous, fully-locked, critical `MemoryPressureNotification`, mirroring the
+   inspector's `TakeHeapSnapshot` foreign-thread-lock pattern — and `Server`, where the
+   `quarvoGcPressureReclaimer` member is declared **last** (so it tears down, and its thread
+   joins, before any isolate it references) and every isolate is registered with it inside
+   `makeWorkerImpl`, next to the inspector registrar. **Rebase watch:** `Impl::Lock`'s constructor
+   signature (used to take the synchronous lock) and `Worker::Isolate::WeakIsolateRef`
+   (= `AtomicWeakRef<Isolate>`, `src/workerd/util/weak-refs.h`) / `getWeakRef()` (the
+   cross-thread-safe isolate reference the registry holds).
 
 ## Enforcement design (why self-heal, not discard)
 
@@ -283,5 +299,40 @@ That validates the mechanism but not the cross-release path, which needs the `qu
 `--remote_cache=<url>` (+ a secret) to the `bazel build` lines — no size cap, shared across
 arches/runs/PRs. This is what upstream does (their cache is private to them). No remote cache or
 extra secrets are configured today; the `--disk_cache` approach needs none.
+
+## CI: running quarvo's bazel test targets on the warm cache
+
+`quarvo/Dockerfile` has a `quarvo-test` stage (`FROM builder AS quarvo-test`) that runs
+`bazel test` against the same build tree and `--disk_cache` as the main `export` stage, so tests
+build incrementally off the warm cache instead of paying a second cold compile. The target list is
+an `ARG QUARVO_TEST_TARGETS` with a default in the Dockerfile, but `quarvo-release.yml` passes its
+own list in via `--build-arg QUARVO_TEST_TARGETS="$QUARVO_TEST_TARGETS"`, where `QUARVO_TEST_TARGETS`
+is an **env value set in the workflow file**, not in the Dockerfile. This is deliberate: the
+Dockerfile's `ARG` default isn't one of the files hashed into the cache key (see above), so adding or
+renaming a test target only touches the workflow env and never rotates the cache key / forces a cold
+rebuild.
+
+The current target list (four targets):
+
+- `//src/workerd/server:quarvo-gc-pressure-test@` — unit tests for the GC-pressure config parsing
+  and threshold logic.
+- `//src/workerd/api/tests:worker-loader-memory-test@` — the `memoryMB` enforcement suite
+  (MEM-1/2/3, REG-1, REARM-1).
+- `//src/workerd/api/tests:worker-loader-memory-gcpressure-test@` — the same memory-limit suite
+  run as a churn `wd_test` with the GC-pressure reclaimer forced on (low threshold, short min
+  interval), asserting `memoryMB` semantics survive constant background unified GCs.
+- `//src/workerd/api/tests:worker-loader-limits-test@` — general Worker Loader `limits` plumbing.
+
+CI runs this stage (and therefore all four targets) on the warm Bazel disk cache for both PRs
+targeting `quarvo-main` and pushes to `quarvo-main`.
+
+The GC-pressure feature also has a container end-to-end test that runs **outside** Bazel:
+`quarvo/e2e/ratchet/run.sh` drives the published image via `docker run` and samples the
+container's `memory.current`: `off` runs uncapped and reproduces the ratchet (800 requests,
+≥80 MiB growth — a memory cap would just OOM-kill the reproduction); `on` stays bounded in a
+512 MiB-capped container (2500 requests, peak ≤260 MiB). It is wired as the `memory-ratchet` job
+in `.github/workflows/quarvo-image-test.yml`, gated dispatch-only (`workflow_dispatch`) since it
+needs an image tag ≥ `quarvo.4` (older images ignore the `QUARVO_GC_PRESSURE*` env vars and would
+OOM the capped container in `on` mode).
 
 See `quarvo/INTEGRATION.md` for how the quarvo runtime consumes the published artifact.

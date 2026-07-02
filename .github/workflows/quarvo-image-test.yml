@@ -9,8 +9,8 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Image tag to test"
-        default: "1.20260623.1-quarvo.1"
+        description: "Image tag to test (memory-ratchet requires >= 1.20260623.1-quarvo.4)"
+        default: "1.20260623.1-quarvo.4"
         required: true
   push:
     tags:
@@ -42,7 +42,7 @@ jobs:
       - name: Run memory-enforcement test against the published image (${{ matrix.arch }})
         run: |
           set -euxo pipefail
-          TAG="${{ github.event.inputs.image_tag || '1.20260623.1-quarvo.1' }}"
+          TAG="${{ github.event.inputs.image_tag || '1.20260623.1-quarvo.4' }}"
           IMG="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/quarvo-workerd:${TAG}"
           # docker pull resolves the multi-arch manifest to this runner's architecture.
           docker pull "$IMG"
@@ -57,3 +57,28 @@ jobs:
           # any failed assertion — so a green job == the shipped binary enforces the memory cap.
           docker run --rm -v "$RUNNER_TEMP/t:/t" -w /t "$IMG" \
             test --predictable /t/test.wd-test --experimental --compat-date=2000-01-01
+
+  memory-ratchet:
+    # Dispatch-only: the on-phase requires an image >= 1.20260623.1-quarvo.4 (older images ignore
+    # the env vars and OOM the capped container); run via dispatch with an explicit image_tag.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ratchet e2e — off reproduces, on stays bounded
+        run: |
+          set -euxo pipefail
+          TAG="${{ github.event.inputs.image_tag || '1.20260623.1-quarvo.4' }}"
+          IMG="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/quarvo-workerd:${TAG}"
+          docker pull "$IMG"
+          bash quarvo/e2e/ratchet/run.sh "$IMG" off
+          bash quarvo/e2e/ratchet/run.sh "$IMG" on

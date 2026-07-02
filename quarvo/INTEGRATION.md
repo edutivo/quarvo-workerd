@@ -38,6 +38,19 @@ source of truth for behavior. In short: a `memoryMB` breach terminates the offen
 the process survives, and the warm isolate self-heals and stays capped; `cpuMs`/`subRequests` are
 **not** enforced by this fork. See [FEATURES.md](FEATURES.md) for the full semantics and gotchas.
 
+## Runtime env vars (GC under memory pressure)
+
+Unlike `WorkerCode.limits` (per-isolate, set by the dispatcher at load time from each function's
+declared limits), the GC-pressure reclaimer is configured **process-wide**, via the runner
+deployment's environment: `QUARVO_GC_PRESSURE`, `QUARVO_GC_PRESSURE_THRESHOLD_PCT`,
+`QUARVO_GC_PRESSURE_THRESHOLD_MB`, `QUARVO_GC_PRESSURE_MIN_INTERVAL_MS`. Full semantics, defaults,
+and the Kubernetes Downward API pattern (for feeding the pod's memory *request* in, since it isn't
+visible in-container) are in **[FEATURES.md](FEATURES.md#gc-under-memory-pressure-quarvo_gc_pressure)**.
+
+Recommended runner setting: `QUARVO_GC_PRESSURE=on` with `QUARVO_GC_PRESSURE_THRESHOLD_MB` fed from
+`resources.requests.memory` (Downward API, divisor `1Mi`). Leaving all of these **unset** is
+byte-identical to stock workerd — no thread, no registry, no behavior change.
+
 ## Distribution / pinning (drop-in swap)
 
 The first release matches quarvo's pinned upstream tag (`v1.20260623.1`) so **only enforcement
