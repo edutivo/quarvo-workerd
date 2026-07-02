@@ -6,13 +6,25 @@
 // src/workerd/api/tests/worker-loader-memory-test.js and worker-loader-test.js:
 // `env.loader.get(name, () => ({compatibilityDate, mainModule, modules, globalOutbound}))` then
 // `.getEntrypoint().fetch(url)`.
+// Workload sizing (calibrated empirically against the shipped 1.20260623.1-quarvo.4 image):
+// 800 iterations x (URL + Request(1 KiB body, padded header) + Response(1 KiB body)) in BOTH
+// the dispatcher and the quant, so each HTTP request churns ~4800 jsg wrappables plus ~5 MiB of
+// body/header strings held by them. All of it is dropped at end-of-request; only a unified
+// (V8+cppgc) GC gets the cppgc share back — that's the ratchet under test. Measured retention
+// with the feature off: ~400 KB/request (313 MiB over 800 requests) — ~3.9x the 80 MiB
+// OFF_MIN_GROWTH assertion in run.sh. Retention scales with wrappable count far more than with
+// payload bytes, so if recalibration is ever needed, adjust the loop count first.
 const QUANT_CODE = `export default {
   async fetch(req) {
     const junk = [];
-    for (let i = 0; i < 200; i++) {
+    for (let i = 0; i < 800; i++) {
       junk.push(new URL("https://quant.example/p/" + i));
-      junk.push(new Request("https://quant.example/r/" + i, { method: "POST", body: "x".repeat(64) }));
-      junk.push(new Response("q".repeat(128)));
+      junk.push(new Request("https://quant.example/r/" + i, {
+        method: "POST",
+        headers: { "x-pad": "p".repeat(1024) },
+        body: "x".repeat(1024),
+      }));
+      junk.push(new Response("q".repeat(1024)));
     }
     return new Response("quant-ok " + junk.length);
   }
@@ -21,10 +33,14 @@ const QUANT_CODE = `export default {
 export default {
   async fetch(req, env) {
     const junk = [];
-    for (let i = 0; i < 200; i++) {
+    for (let i = 0; i < 800; i++) {
       junk.push(new URL("https://dispatcher.example/a/" + i));
-      junk.push(new Request("https://dispatcher.example/b/" + i, { headers: { "x-n": String(i) } }));
-      junk.push(new Response("y".repeat(128)));
+      junk.push(new Request("https://dispatcher.example/b/" + i, {
+        method: "POST",
+        headers: { "x-n": String(i), "x-pad": "h".repeat(1024) },
+        body: "y".repeat(1024),
+      }));
+      junk.push(new Response("z".repeat(1024)));
     }
 
     const quant = env.loader.get("quant-1", () => ({
