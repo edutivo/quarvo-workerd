@@ -6,7 +6,7 @@
 #
 # This Dockerfile carries a persistent Bazel ACTION cache (--disk_cache) so rebuilds are fast: ~99%
 # of the ~8,500 build actions (V8/abseil/ICU/boringssl) are identical across our fork's commits, so a
-# warm cache turns the ~3 h cold compile into minutes. It has three useful targets:
+# warm cache turns the ~3 h cold compile into minutes. It has four useful targets:
 #
 #   * runtime (default) -- a runnable image. A plain `docker build` compiles cold (empty seed) and
 #       produces the runtime image, exactly as before:
@@ -16,7 +16,10 @@
 #         docker buildx build -f quarvo/Dockerfile --target export \
 #           --build-context bazelcache=<restored-cache-dir> \
 #           --output type=local,dest=out .
-#   * builder           -- the heavy compile stage the two above share.
+#   * quarvo-test       -- runs the quarvo bazel test targets against the same build tree + disk
+#       cache; target list via the QUARVO_TEST_TARGETS build-arg (CI runs this on PRs to
+#       quarvo-main and on quarvo-main pushes).
+#   * builder           -- the heavy compile stage the three above share.
 #
 # See quarvo/MAINTENANCE.md "CI build caching" for the full workflow + the thin push image
 # (quarvo/Dockerfile.runtime).
@@ -71,6 +74,16 @@ RUN find /bazel-disk-cache -size +100M -type f -delete || true
 FROM scratch AS export
 COPY --from=builder /workerd-bin /workerd-bin
 COPY --from=builder /bazel-disk-cache /bazel-disk-cache
+
+# CI test target: run the quarvo regression test targets against the same build tree + disk cache.
+# The target list is a BUILD-ARG (not baked into this file) so extending it later does NOT change
+# this file's hash — which is part of the CI cache key (editing this file forces a ~3h cold build).
+# worker-loader-test@ is excluded by default: it is tagged requires-network and flaky in builders.
+FROM builder AS quarvo-test
+ARG QUARVO_TEST_TARGETS="//src/workerd/api/tests:worker-loader-memory-test@ //src/workerd/api/tests:worker-loader-limits-test@"
+RUN bazel test --disk_cache=/bazel-disk-cache --config=release_linux \
+      --test_output=errors ${QUARVO_TEST_TARGETS} \
+    && touch /quarvo-tests-ok
 
 # Default target: a runnable image built in one shot from the freshly compiled binary. CI does NOT
 # use this stage (it builds the thin quarvo/Dockerfile.runtime from the exported binary to avoid a
