@@ -7,6 +7,7 @@
 #include "alarm-scheduler.h"
 #include "container-client.h"
 #include "pyodide.h"
+#include "quarvo-gc-pressure.h"
 #include "workerd-api.h"
 
 #include <workerd/api/actor-state.h>
@@ -193,7 +194,9 @@ Server::Server(kj::Filesystem& fs,
       loggingOptions(loggingOptions),
       memoryCacheProvider(kj::heap<api::MemoryCacheProvider>(timer)),
       channelTokenHandler(*this),
-      tasks(*this) {}
+      tasks(*this) {
+  quarvoGcPressureReclaimer = QuarvoGcPressureReclaimer::tryCreateFromEnv();
+}
 
 struct Server::GlobalContext {
   jsg::V8System& v8System;
@@ -5309,6 +5312,16 @@ kj::Promise<kj::Own<Server::WorkerService>> Server::makeWorkerImpl(kj::StringPtr
   // with the inspector service.
   KJ_IF_SOME(isolateRegistrar, inspectorIsolateRegistrar) {
     isolateRegistrar->registerIsolate(name, isolate.get());
+  }
+
+  // NOTE(quarvo): register every isolate (static and dynamic — dispatcher, tail workers, and
+  // worker-loader isolates alike) with the GC-pressure reclaimer. Weak refs self-invalidate on
+  // isolate teardown; dead entries are pruned lazily by the reclaim thread. Registration
+  // precedes Worker construction (which holds the lock synchronously, so getCurrentLoad()==0
+  // during script eval); a reclaim round firing in that window just GCs a near-empty heap or
+  // briefly serializes with cold-start eval — accepted.
+  KJ_IF_SOME(reclaimer, quarvoGcPressureReclaimer) {
+    reclaimer->registerIsolate(isolate->getWeakRef());
   }
 
   if (!usingNewModuleRegistry) {

@@ -29,6 +29,8 @@ namespace workerd::server {
 
 using api::pyodide::PythonConfig;
 
+class QuarvoGcPressureReclaimer;
+
 // Implements the single-tenant Workers Runtime server / CLI.
 //
 // The purpose of this class is to implement the core logic independently of the CLI itself,
@@ -220,6 +222,13 @@ class Server final: private kj::TaskSet::ErrorHandler, private ChannelTokenHandl
 
   // Especially includes server loop tasks to listen on sockets. Any error is considered fatal.
   kj::TaskSet tasks;
+
+  // NOTE(quarvo): background GC-pressure reclaimer (QUARVO_GC_PRESSURE). kj::none when the
+  // feature is off (the default) — in that case no thread or registry exists and behavior is
+  // byte-identical to stock workerd. Declared last so its destructor (which joins the reclaim
+  // thread and releases any strong isolate refs held by an in-flight round) runs before any
+  // other member teardown.
+  kj::Maybe<kj::Own<QuarvoGcPressureReclaimer>> quarvoGcPressureReclaimer;
 
   // Reports an exception thrown by a task in `tasks`.
   void taskFailed(kj::Exception&& exception) override;

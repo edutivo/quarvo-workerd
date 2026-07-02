@@ -4429,7 +4429,9 @@ void Worker::Isolate::memoryPressureReclaim() const {
   // Locker counts as the isolate thread). Without the lock, V8 would only set a stack-guard
   // interrupt + post a foreground task that workerd pumps during request processing — i.e.
   // the GC would land at the front of the NEXT live request, the opposite of what the
-  // background reclaimer wants.
+  // background reclaimer wants. Note: constructing Impl::Lock also drains the isolate's
+  // cross-thread worker-destruction queue, so queued dead Workers/contexts are freed on this
+  // thread as part of the reclaim — intentional, and common to every lock taker.
   jsg::runInV8Stack([&](jsg::V8StackScope& stackScope) {
     Isolate::Impl::Lock recordedLock(*this, Worker::Lock::TakeSynchronously(kj::none), stackScope);
     recordedLock.lock->v8Isolate->MemoryPressureNotification(v8::MemoryPressureLevel::kCritical);
