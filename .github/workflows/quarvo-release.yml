@@ -32,6 +32,8 @@ on:
       version:
         description: "Image tag, e.g. 1.20260623.1-quarvo.1 (upstream tag + -quarvo.N)"
         required: true
+  pull_request:
+    branches: [quarvo-main]
   push:
     # Cache-warm runs. GitHub scopes the Actions cache PER REF: a release (each a distinct
     # `v*-quarvo.*` tag = a distinct ref) can only restore caches from its own ref or the DEFAULT
@@ -42,14 +44,16 @@ on:
     tags:
       - "v*-quarvo.*"
 
-# Never run two builds for the same ref at once. cancel-in-progress: false leaves an in-flight build
-# to FINISH (so a cache-warm run completes and SAVES the cache instead of being killed); newer pushes
-# to the same ref queue and supersede each other (only the latest pending survives), so duplicate ~3h
-# cold builds don't pile up. Per-ref grouping: cache-warm runs on quarvo-main serialize with each
-# other, while each release tag is its own group and runs independently.
+# Never run two builds for the same ref at once. PR runs are safely cancelable (they never save the
+# cache nor publish an image), so a newer push to the same PR cancels the in-flight run. quarvo-main
+# and tag runs must still run to COMPLETION (a cache-warm run finishes and SAVES the cache instead of
+# being killed); newer pushes to those refs queue and supersede each other (only the latest pending
+# survives), so duplicate ~3h cold builds don't pile up. Per-ref grouping: cache-warm runs on
+# quarvo-main serialize with each other, while each release tag is its own group and runs
+# independently.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -57,6 +61,8 @@ permissions:
 
 env:
   IMAGE: ghcr.io/edutivo/quarvo-workerd
+  # Extra/override test targets for the quarvo-test stage; empty = Dockerfile default list.
+  QUARVO_TEST_TARGETS: ""
 
 jobs:
   build:
@@ -81,19 +87,28 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      # Restore the per-arch Bazel disk cache. EXACT key, NO restore-keys: a prefix match would let
-      # the cache snowball in size across runs (see upstream .github/workflows/_bazel.yml). amd64 and
-      # arm64 action hashes differ, so they must never share an entry. quarvo/Dockerfile is in the
-      # hash so a toolchain/recipe change rotates the key (forces a fresh cache). Split restore/save
-      # (not the integrated cache) so a FAILED build can't poison the key with a partial/empty cache.
+      # Restore the per-arch Bazel disk cache. Exact key preferred; when a key rotation (a change to
+      # one of the hashed files, e.g. quarvo/Dockerfile) misses it, the restore-keys prefix seeds
+      # from the newest previous cache instead of a ~3h cold build. Snowballing is bounded by the
+      # Dockerfile's >100MB-entry trim and GitHub's 10GB LRU eviction. amd64 and arm64 action hashes
+      # differ, so the per-arch prefix keeps them from ever sharing an entry. Split restore/save
+      # (not the integrated cache) so a FAILED build can't poison the key with a partial/empty cache;
+      # save still uses the exact key and runs on quarvo-main only.
       - name: Restore Bazel disk cache
         id: bazel-cache
         uses: actions/cache/restore@v4
         with:
           path: ~/bazel-disk-cache
           key: bazel-disk-${{ matrix.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'MODULE.bazel', 'quarvo/Dockerfile') }}
+          # Fallback prefix: rotating the hashed key (e.g. a quarvo/Dockerfile edit) seeds from the
+          # newest previous cache instead of going cold. Restore-only — the save step below still
+          # uses the exact key and stays gated to quarvo-main, so the cache doesn't snowball in size.
+          restore-keys: |
+            bazel-disk-${{ matrix.arch }}-
 
       - name: Build workerd + export updated Bazel cache (${{ matrix.arch }})
+        env:
+          RUN_QUARVO_TESTS: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/quarvo-main' }}
         run: |
           set -euxo pipefail
           mkdir -p "$HOME/bazel-disk-cache"            # cold run: empty seed for --build-context
@@ -113,6 +128,22 @@ jobs:
           # so log the numbers to make it diagnosable. See MAINTENANCE.md "CI build caching" for the
           # peak-disk reality + escape hatches (bigger runner / relocate to /mnt) if this ever trips.
           echo "Disk after export build:"; df -h / || true
+          # Run the quarvo test targets on PR / quarvo-main runs. Same Dockerfile + SAME
+          # bazelcache build-context as the export build above => buildkit reuses every builder
+          # layer and only the new `RUN bazel test` executes (the builder layer already holds the
+          # fully-built bazel output tree, so the tests build/run incrementally in minutes).
+          # Must run BEFORE the cache swap below: swapping the build-context content would
+          # invalidate the COPY --from=bazelcache layer and force a rebuild of the whole stage.
+          if [ "$RUN_QUARVO_TESTS" = "true" ]; then
+            docker buildx build \
+              --target quarvo-test \
+              --build-context bazelcache="$HOME/bazel-disk-cache" \
+              ${QUARVO_TEST_TARGETS:+--build-arg QUARVO_TEST_TARGETS="$QUARVO_TEST_TARGETS"} \
+              --file quarvo/Dockerfile \
+              .
+            echo "quarvo test targets passed"
+          fi
+          df -h / || true
           # Replace the restored cache with the freshly-built one so the save step persists it.
           # Moving it out of $RUNNER_TEMP/out also keeps the thin runtime build context tiny.
           rm -rf "$HOME/bazel-disk-cache"
@@ -225,3 +256,20 @@ jobs:
 
       - name: Inspect (confirm amd64 + arm64)
         run: docker buildx imagetools inspect "${IMAGE}:${{ steps.meta.outputs.version }}"
+
+      - name: Capture multi-arch index digest
+        id: digest
+        run: |
+          set -euo pipefail
+          d=$(docker buildx imagetools inspect \
+                "${IMAGE}:${{ steps.meta.outputs.version }}" \
+                --format '{{json .Manifest}}' | jq -r '.digest')
+          [ -n "$d" ]
+          [ "$d" != "null" ]
+          echo "index_digest=${d}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### quarvo-workerd ${{ steps.meta.outputs.version }}"
+            echo "- tag: \`${IMAGE}:${{ steps.meta.outputs.version }}\`"
+            echo "- multi-arch index digest: \`${d}\`"
+            echo "- pin: \`${IMAGE}@${d}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
