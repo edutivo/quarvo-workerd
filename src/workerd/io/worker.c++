@@ -4422,6 +4422,20 @@ uint Worker::Isolate::getLockSuccessCount() const {
   return __atomic_load_n(&impl->lockSuccessCount, __ATOMIC_RELAXED);
 }
 
+void Worker::Isolate::memoryPressureReclaim() const {
+  // NOTE(quarvo): Impl::Lock takes the real v8::Locker; with the lock held,
+  // MemoryPressureNotification(kCritical) runs the full unified GC synchronously on THIS
+  // thread (see V8 api.cc Isolate::MemoryPressureNotification: a foreign thread holding the
+  // Locker counts as the isolate thread). Without the lock, V8 would only set a stack-guard
+  // interrupt + post a foreground task that workerd pumps during request processing — i.e.
+  // the GC would land at the front of the NEXT live request, the opposite of what the
+  // background reclaimer wants.
+  jsg::runInV8Stack([&](jsg::V8StackScope& stackScope) {
+    Isolate::Impl::Lock recordedLock(*this, Worker::Lock::TakeSynchronously(kj::none), stackScope);
+    recordedLock.lock->v8Isolate->MemoryPressureNotification(v8::MemoryPressureLevel::kCritical);
+  });
+}
+
 kj::Own<const Worker::Script> Worker::Isolate::newScript(kj::StringPtr scriptId,
     const Script::Source& source,
     IsolateObserver::StartType startType,
