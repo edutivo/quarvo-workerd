@@ -91,6 +91,23 @@ And add at the top of the workflow (workflow-level `env:` block, next to `IMAGE`
 
 (PR-2 will set this to the full list including the new targets.)
 
+- [ ] **Step 2.2b: Add restore-keys so the Dockerfile-edit key rotation stays warm**
+
+The cache key hashes `quarvo/Dockerfile`, so Task 1 rotates it. To avoid a ~3 h cold rebuild,
+add a prefix fallback to the RESTORE step (restore only — the save step and its exact-key
+condition stay unchanged):
+
+```yaml
+          restore-keys: |
+            bazel-disk-${{ matrix.arch }}-
+```
+
+(The existing key line `bazel-disk-${{ matrix.arch }}-${{ hashFiles(...) }}` stays as-is; on an
+exact miss the newest cache with the prefix seeds the build — V8/ICU/abseil all hit and only
+genuinely new actions compile. This deliberately relaxes the repo's earlier "no restore-keys"
+stance; the >100 MB trim in the Dockerfile plus GitHub's 10 GB LRU bound the snowball risk.
+Document this in MAINTENANCE.md — see Task 10.3.)
+
 - [ ] **Step 2.3: Capture the multi-arch INDEX digest in the `merge` job**
 
 After the existing "Inspect (confirm amd64 + arm64)" step, add:
@@ -154,10 +171,13 @@ NOTE: rotates the Bazel cache key (Dockerfile edit) — the post-merge run is on
 ```bash
 gh pr merge --squash --subject "quarvo: CI test stage on warm cache + index-digest capture (#N)"
 gh run list --workflow=quarvo-release.yml --branch=quarvo-main --limit 1
-gh run watch <run-id>   # cold: expect ~3h; both arches build, tests run, cache saves
+gh run watch <run-id>   # warm via restore-keys fallback; extra test-dep compilation ~10-30 min
 ```
 
-Expected: run green; test step passes (existing memory/limits wd_tests); cache saved under the new key. If the test step fails on pre-existing tests, STOP and investigate before Phase 2 (do not proceed on a red base).
+Expected: run green in well under an hour (restore-keys seeds the old warm cache; only the new
+test-target deps compile); test step passes (existing memory/limits wd_tests); cache saved under
+the NEW key so later runs are exact-hit warm. If the test step fails on pre-existing tests, STOP
+and investigate before Phase 2 (do not proceed on a red base).
 
 ---
 
@@ -1192,6 +1212,12 @@ In the CI section add:
   quarvo-release.yml (so list changes don't rotate the cache key). PRs to quarvo-main build
   and test on the base branch's warm cache without saving or publishing. Release runs emit the
   multi-arch **index digest** as a `merge`-job output and in the step summary.
+- The cache RESTORE step now has a `restore-keys` prefix fallback (`bazel-disk-<arch>-`): when
+  one of the hashed files (e.g. `quarvo/Dockerfile`) changes and rotates the exact key, the
+  build seeds from the newest previous cache instead of going cold (~3 h). This relaxes the
+  original "no restore-keys" stance; snowballing is bounded by the >100 MB trim in the
+  Dockerfile and GitHub's 10 GB LRU eviction. The save path is unchanged (exact key,
+  quarvo-main only).
 ```
 
 - [ ] **Step 10.4: README.md capability row + CHANGELOG entry**
