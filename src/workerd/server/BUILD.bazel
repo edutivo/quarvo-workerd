@@ -216,6 +216,21 @@ wd_cc_library(
 )
 
 wd_cc_library(
+    name = "quarvo-gc-pressure",
+    srcs = ["quarvo-gc-pressure.c++"],
+    hdrs = ["quarvo-gc-pressure.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/workerd/io",
+    ],
+)
+
+kj_test(
+    src = "quarvo-gc-pressure-test.c++",
+    deps = [":quarvo-gc-pressure"],
+)
+
+wd_cc_library(
     name = "server",
     srcs = [
         "server.c++",
@@ -231,6 +246,7 @@ wd_cc_library(
         ":container-client",
         ":facet-tree-index",
         ":fallback-service",
+        ":quarvo-gc-pressure",
         ":workerd-api",
         ":workerd_capnp",
         "//src/cloudflare",
