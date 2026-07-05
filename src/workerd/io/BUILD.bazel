@@ -248,6 +248,23 @@ wd_cc_library(
     ],
 )
 
+# NOTE(quarvo): metering core for the opt-in runtime meters (QUARVO_RUNTIME_METERING). Pure
+# kj — no io deps — so observer.h can include it. See quarvo-metering.h.
+wd_cc_library(
+    name = "quarvo-metering",
+    srcs = ["quarvo-metering.c++"],
+    hdrs = ["quarvo-metering.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@capnp-cpp//src/kj",
+    ],
+)
+
+kj_test(
+    src = "quarvo-metering-test.c++",
+    deps = [":quarvo-metering"],
+)
+
 wd_cc_library(
     name = "observer",
     srcs = ["observer.c++"],
@@ -259,6 +276,7 @@ wd_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":features_capnp",
+        ":quarvo-metering",
         ":trace",
         "//src/workerd/jsg:observer",
         "//src/workerd/util:sqlite",
