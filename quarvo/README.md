@@ -16,6 +16,8 @@ loaded isolate is byte-for-byte equivalent to stock workerd at the same tag.
 | `cpuMs` — per-request CPU cap | 🚧 Planned (Phase B) | [FEATURES.md](FEATURES.md#cpums--per-request-cpu-time-cap) |
 | `subRequests` — subrequest count cap | ⛔ Not planned (quarvo allow-list) | [FEATURES.md](FEATURES.md#subrequests--subrequest-count-cap) |
 | GC under memory pressure (`QUARVO_GC_PRESSURE`) | ✅ Shipped (opt-in) | [FEATURES.md](FEATURES.md#gc-under-memory-pressure-quarvo_gc_pressure) |
+| Runtime metering — `stub.getStats()` (`QUARVO_RUNTIME_METERING`) | ✅ Shipped (opt-in) | [FEATURES.md](FEATURES.md#runtime-metering-quarvo_runtime_metering--per-worker-stolenms--cpums) |
+| Boot config banner (`quarvo-workerd: …` stderr line) | ✅ Shipped (always on) | [FEATURES.md](FEATURES.md#boot-config-banner) |
 
 ## Which doc do I read?
 

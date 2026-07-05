@@ -82,3 +82,37 @@ jobs:
           docker pull "$IMG"
           bash quarvo/e2e/ratchet/run.sh "$IMG" off
           bash quarvo/e2e/ratchet/run.sh "$IMG" on
+
+  meter-overhead:
+    # Dispatch-only: requires an image >= 1.20260623.1-quarvo.5 (older images have no metering
+    # and no boot banner, so the banner/getStats assertions would fail by construction).
+    # The <=MAX_REGRESSION_PCT bound is a loose regression tripwire — shared runners are too
+    # noisy to assert the honest 1-2% target; that number comes from a quiet-host run and is
+    # published in quarvo/FEATURES.md.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Metering overhead — off vs on throughput + banner contract
+        run: |
+          set -euxo pipefail
+          TAG="${{ github.event.inputs.image_tag || '1.20260623.1-quarvo.4' }}"
+          IMG="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/quarvo-workerd:${TAG}"
+          docker pull "$IMG"
+          bash quarvo/e2e/meter-overhead/run.sh "$IMG" off
+          bash quarvo/e2e/meter-overhead/run.sh "$IMG" on
+          OFF=$(cat /tmp/meter-overhead-rps-off); ON=$(cat /tmp/meter-overhead-rps-on)
+          PCT=$(echo "scale=2; (1 - $ON / $OFF) * 100" | bc)
+          echo "metering overhead: ${PCT}% (off=${OFF} rps, on=${ON} rps)"
+          MAX_REGRESSION_PCT="${MAX_REGRESSION_PCT:-10}"
+          test "$(echo "$PCT < $MAX_REGRESSION_PCT" | bc)" = "1" || {
+            echo "FAIL: metering overhead ${PCT}% exceeds ${MAX_REGRESSION_PCT}% bound"; exit 1; }

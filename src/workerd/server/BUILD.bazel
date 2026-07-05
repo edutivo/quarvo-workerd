@@ -230,6 +230,22 @@ kj_test(
     deps = [":quarvo-gc-pressure"],
 )
 
+# NOTE(quarvo): boot config banner (spec §6.1) — pure kj composition + stderr print.
+wd_cc_library(
+    name = "quarvo-banner",
+    srcs = ["quarvo-banner.c++"],
+    hdrs = ["quarvo-banner.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@capnp-cpp//src/kj",
+    ],
+)
+
+kj_test(
+    src = "quarvo-banner-test.c++",
+    deps = [":quarvo-banner"],
+)
+
 wd_cc_library(
     name = "server",
     srcs = [
@@ -246,6 +262,7 @@ wd_cc_library(
         ":container-client",
         ":facet-tree-index",
         ":fallback-service",
+        ":quarvo-banner",
         ":quarvo-gc-pressure",
         ":workerd-api",
         ":workerd_capnp",

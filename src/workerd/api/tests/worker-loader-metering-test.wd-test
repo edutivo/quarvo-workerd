@@ -1,0 +1,23 @@
+# quarvo: runtime-metering behavior suite (feature detection, self-calibrating cpuMs,
+# stolenMs differential + split counters, estimator class, read-mid-traffic, epoch-across-
+# respawn). Runs with QUARVO_RUNTIME_METERING=on via the wd_test env. Tight ±tolerances are
+# the quiet-host e2e's job (quarvo/e2e/meter-overhead); bounds here are CI-safe directional
+# checks. The companion worker-loader-metering-off-test.wd-test runs the same JS stock.
+using Workerd = import "/workerd/workerd.capnp";
+
+const unitTests :Workerd.Config = (
+  services = [
+    ( name = "worker-loader-metering-test",
+      worker = (
+        modules = [
+          (name = "worker", esModule = embed "worker-loader-metering-test.js")
+        ],
+        compatibilityFlags = ["nodejs_compat", "experimental"],
+        bindings = [
+          (name = "loader", workerLoader = ()),
+          (name = "expectMetering", text = "on"),
+        ],
+      )
+    ),
+  ],
+);

@@ -8,6 +8,7 @@
 #include <workerd/io/compatibility-date.capnp.h>
 #include <workerd/io/frankenvalue.h>
 #include <workerd/io/io-util.h>
+#include <workerd/io/quarvo-metering.h>
 #include <workerd/io/trace.h>
 #include <workerd/io/worker-interface.capnp.h>
 #include <workerd/io/worker-source.h>
@@ -477,6 +478,13 @@ class WorkerStubChannel: public kj::Refcounted {
       kj::Maybe<kj::String> name, Frankenvalue props, kj::Maybe<ResourceLimits> limits);
   virtual kj::Own<IoChannelFactory::ActorClassChannel> getActorClassResolved(
       kj::Maybe<kj::String> name, Frankenvalue props, kj::Maybe<ResourceLimits> limits) = 0;
+
+  // NOTE(quarvo): synchronous, lock-free counter snapshot for the loader-holding parent
+  // (WorkerStub.getStats()). none => this channel impl has no meter (metering off, or a
+  // non-server implementation). Never enters the child isolate.
+  virtual kj::Maybe<quarvo::MeterSnapshot> getQuarvoStats() {
+    return kj::none;
+  }
 
   // TODO(someday): Allow caller to enumerate entrypoints?
 };

@@ -64,9 +64,13 @@ env:
   # Extra/override test targets for the quarvo-test stage; empty = Dockerfile default list.
   QUARVO_TEST_TARGETS: >-
     //src/workerd/server:quarvo-gc-pressure-test@
+    //src/workerd/server:quarvo-banner-test@
+    //src/workerd/io:quarvo-metering-test@
     //src/workerd/api/tests:worker-loader-memory-test@
     //src/workerd/api/tests:worker-loader-memory-gcpressure-test@
     //src/workerd/api/tests:worker-loader-limits-test@
+    //src/workerd/api/tests:worker-loader-metering-test@
+    //src/workerd/api/tests:worker-loader-metering-off-test@
 
 jobs:
   build:

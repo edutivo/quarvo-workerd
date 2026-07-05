@@ -1,0 +1,23 @@
+# quarvo: differential variant of worker-loader-metering-test — same JS, NO
+# QUARVO_RUNTIME_METERING in the environment. Asserts stub.getStats does not exist (feature
+# detection falls through to the consumer's fallback estimator); all metering tests no-op.
+# Stock behavioral equivalence is separately pinned by the unchanged worker-loader-memory /
+# -limits suites.
+using Workerd = import "/workerd/workerd.capnp";
+
+const unitTests :Workerd.Config = (
+  services = [
+    ( name = "worker-loader-metering-off-test",
+      worker = (
+        modules = [
+          (name = "worker", esModule = embed "worker-loader-metering-test.js")
+        ],
+        compatibilityFlags = ["nodejs_compat", "experimental"],
+        bindings = [
+          (name = "loader", workerLoader = ()),
+          (name = "expectMetering", text = "off"),
+        ],
+      )
+    ),
+  ],
+);

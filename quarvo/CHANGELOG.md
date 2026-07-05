@@ -19,6 +19,21 @@ Categories: **Added** (new capability) · **Changed** (behavior change) · **Fix
 
 ## [Unreleased]
 
+### Added
+- **Opt-in runtime metering** (`QUARVO_RUNTIME_METERING=on`): per-loader-key `stub.getStats()`
+  on the Worker Loader stub, returning `cpuMs` (thread-CPU in the worker's JS slices) and
+  `stolenMs` (runnable-but-not-running time stolen by other isolates on the shared JS thread;
+  split into exact `timerLagMs`/`lockWaitMs` and estimated `resumeDelayEstMs`), plus
+  `startDelayMs` (delivery → first instruction, excluded from `stolenMs`) and an `epoch`
+  counter that increments when an isolate is respawned under a live loader key. Parent-only by
+  construction; consumers feature-detect via `typeof stub.getStats === "function"`. Default off
+  is behavior-byte-identical to stock; an unrecognized flag value refuses to boot. ([#N])
+- **Boot config banner**: one `quarvo-workerd: <version> metering=… gc_pressure=… …` line on
+  stderr at startup stating the resolved state of every quarvo feature (fork version compiled
+  in; GC-pressure numbers are the effective post-resolution values, with an `inert` state when
+  no cgroup v2 is visible). Prints unconditionally — the one deliberate, documented exception
+  to "default off = byte-identical", requested by quarvo for fleet config audits. ([#N])
+
 ## [1.20260623.1-quarvo.4] — 2026-07-02
 
 **Upstream base:** workerd `v1.20260623.1` · **Image:** `…/quarvo-workerd:1.20260623.1-quarvo.4` ·

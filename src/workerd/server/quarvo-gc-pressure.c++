@@ -211,6 +211,22 @@ kj::Maybe<uint64_t> QuarvoGcPressureReclaimer::readCgroupFile(kj::StringPtr file
   return kj::none;
 }
 
+kj::String QuarvoGcPressureReclaimer::bannerFragment() const {
+  // Boot-time only; reads memory.max once, same as a tick would. `unresolved` means the
+  // threshold cannot be computed yet (e.g. memory.max is "max" and no absolute MB configured)
+  // — the reclaimer will warn separately when it cannot trigger.
+  if (cgroupDir == kj::none) {
+    return kj::str("gc_pressure=inert gc_threshold_pct=", config.thresholdPct,
+        " gc_min_interval_ms=", config.minIntervalMs);
+  }
+  kj::String mb = kj::str("unresolved");
+  KJ_IF_SOME(t, effectiveThresholdBytes(config, readCgroupFile("memory.max"))) {
+    mb = kj::str(t / (1024 * 1024));
+  }
+  return kj::str("gc_pressure=on gc_threshold_mb=", mb, " gc_threshold_pct=",
+      config.thresholdPct, " gc_min_interval_ms=", config.minIntervalMs);
+}
+
 void QuarvoGcPressureReclaimer::tick() {
   uint64_t usage;
   KJ_IF_SOME(u, readCgroupFile("memory.current")) {

@@ -265,6 +265,19 @@ kj_test(
     deps = [":quarvo-metering"],
 )
 
+# NOTE(quarvo): QuarvoLockTiming / QuarvoIsolateObserver — separate target because it depends
+# on :observer while :observer's header includes quarvo-metering.h (core lib above).
+wd_cc_library(
+    name = "quarvo-metering-observer",
+    srcs = ["quarvo-metering-observer.c++"],
+    hdrs = ["quarvo-metering-observer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":observer",
+        ":quarvo-metering",
+    ],
+)
+
 wd_cc_library(
     name = "observer",
     srcs = ["observer.c++"],
