@@ -19,6 +19,11 @@ Categories: **Added** (new capability) · **Changed** (behavior change) · **Fix
 
 ## [Unreleased]
 
+## [1.20260623.1-quarvo.5] — 2026-07-06
+
+**Upstream base:** workerd `v1.20260623.1` · **Image:** `…/quarvo-workerd:1.20260623.1-quarvo.5` ·
+**Index digest:** `sha256:a40467b8b8c1b4f69595aa1f49b86650ee2fc7add3a746e71519c19f4adaac61`
+
 ### Added
 - **Opt-in runtime metering** (`QUARVO_RUNTIME_METERING=on`): per-loader-key `stub.getStats()`
   on the Worker Loader stub, returning `cpuMs` (thread-CPU in the worker's JS slices) and
