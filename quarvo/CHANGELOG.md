@@ -27,12 +27,12 @@ Categories: **Added** (new capability) · **Changed** (behavior change) · **Fix
   `startDelayMs` (delivery → first instruction, excluded from `stolenMs`) and an `epoch`
   counter that increments when an isolate is respawned under a live loader key. Parent-only by
   construction; consumers feature-detect via `typeof stub.getStats === "function"`. Default off
-  is behavior-byte-identical to stock; an unrecognized flag value refuses to boot. ([#N])
+  is behavior-byte-identical to stock; an unrecognized flag value refuses to boot. ([#12])
 - **Boot config banner**: one `quarvo-workerd: <version> metering=… gc_pressure=… …` line on
   stderr at startup stating the resolved state of every quarvo feature (fork version compiled
   in; GC-pressure numbers are the effective post-resolution values, with an `inert` state when
   no cgroup v2 is visible). Prints unconditionally — the one deliberate, documented exception
-  to "default off = byte-identical", requested by quarvo for fleet config audits. ([#N])
+  to "default off = byte-identical", requested by quarvo for fleet config audits. ([#12])
 
 ## [1.20260623.1-quarvo.4] — 2026-07-02
 
@@ -113,6 +113,7 @@ First quarvo release.
 - A single allocation larger than the headroom the enforcer grants can still fatally OOM the process
   before the request is torn down; use conservative caps for untrusted code.
 
+[#12]: https://github.com/edutivo/quarvo-workerd/pull/12
 [#9]: https://github.com/edutivo/quarvo-workerd/pull/9
 [#8]: https://github.com/edutivo/quarvo-workerd/pull/8
 [#6]: https://github.com/edutivo/quarvo-workerd/pull/6

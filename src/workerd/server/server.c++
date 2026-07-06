@@ -4834,7 +4834,7 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted, private kj::TaskSet:
         : onAborted(kj::mv(onAborted)),
           quarvoMeter(quarvo::meteringEnabled()
                   ? kj::Maybe<kj::Own<const quarvo::WorkerMeter>>(
-                        kj::atomicRefcounted<const quarvo::WorkerMeter>(quarvoEpoch))
+                        kj::atomicRefcounted<quarvo::WorkerMeter>(quarvoEpoch))
                   : kj::none),
           startupTask(start(server, kj::mv(isolateName), kj::mv(fetchSource)).fork()),
           cleanupTaskSet(server.tasks) {}

@@ -92,6 +92,7 @@ wd_cc_library(
         ":limit-enforcer",
         ":maximum-compatibility-date",
         ":observer",
+        ":quarvo-metering",
         ":release-version",
         ":trace",
         ":wasm-instantiate-shim",
