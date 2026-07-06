@@ -4,6 +4,7 @@
 #include <workerd/io/compatibility-date.h>
 #include <workerd/io/io-channels.h>
 #include <workerd/io/io-own.h>
+#include <workerd/io/quarvo-metering.h>
 #include <workerd/io/worker.h>
 #include <workerd/jsg/setup.h>
 
@@ -26,16 +27,39 @@ class WorkerStub: public jsg::Object {
     JSG_STRUCT(props, limits);
   };
 
+  // NOTE(quarvo): counter snapshot for this loaded worker; parent-only by construction (child
+  // workers never hold a WorkerStub). Registered only when QUARVO_RUNTIME_METERING is on —
+  // consumers feature-detect via `typeof stub.getStats === "function"`. All values are
+  // milliseconds (fractional) since isolate creation; epoch increments per (re)creation under
+  // the same loader key. Design: docs/superpowers/specs/2026-07-05-quarvo-runtime-metering-design.md
+  struct WorkerStats {
+    double cpuMs;
+    double stolenMs;  // = timerLagMs + lockWaitMs + resumeDelayEstMs
+    double timerLagMs;
+    double lockWaitMs;
+    double resumeDelayEstMs;  // busy-window ESTIMATE (spec §4.3/§4.4), not exact
+    double startDelayMs;      // exact; deliberately NOT included in stolenMs
+    int epoch;
+
+    JSG_STRUCT(cpuMs, stolenMs, timerLagMs, lockWaitMs, resumeDelayEstMs, startDelayMs, epoch);
+  };
+
   jsg::Ref<Fetcher> getEntrypoint(jsg::Lock& js,
       jsg::Optional<kj::Maybe<kj::String>> name,
       jsg::Optional<EntrypointOptions> options);
   jsg::Ref<DurableObjectClass> getDurableObjectClass(jsg::Lock& js,
       jsg::Optional<kj::Maybe<kj::String>> name,
       jsg::Optional<EntrypointOptions> options);
+  WorkerStats getStats(jsg::Lock& js);
 
   JSG_RESOURCE_TYPE(WorkerStub, CompatibilityFlags::Reader flags) {
     JSG_METHOD(getEntrypoint);
     JSG_METHOD(getDurableObjectClass);
+    if (workerd::quarvo::meteringEnabled()) {
+      // NOTE(quarvo): fork-only surface, deliberately absent from the TS override below (the
+      // fork does not ship TS types for it) and from stock-flag runs (feature detection).
+      JSG_METHOD(getStats);
+    }
 
     JSG_TS_OVERRIDE({
       getEntrypoint<T extends Rpc.WorkerEntrypointBranded | undefined>(
@@ -150,7 +174,8 @@ class WorkerLoader: public jsg::Object {
 };
 
 #define EW_WORKER_LOADER_ISOLATE_TYPES                                                             \
-  api::WorkerStub, api::WorkerStub::EntrypointOptions, api::WorkerLoader,                          \
-      api::WorkerLoader::Module, api::WorkerLoader::WorkerCode, workerd::ResourceLimits
+  api::WorkerStub, api::WorkerStub::EntrypointOptions, api::WorkerStub::WorkerStats,               \
+      api::WorkerLoader, api::WorkerLoader::Module, api::WorkerLoader::WorkerCode,                 \
+      workerd::ResourceLimits
 
 }  // namespace workerd::api

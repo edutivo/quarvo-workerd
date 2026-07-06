@@ -7,8 +7,12 @@
 #include "alarm-scheduler.h"
 #include "container-client.h"
 #include "pyodide.h"
+#include "quarvo-banner.h"
 #include "quarvo-gc-pressure.h"
 #include "workerd-api.h"
+
+#include <workerd/io/quarvo-metering-observer.h>
+#include <workerd/io/quarvo-metering.h>
 
 #include <workerd/api/actor-state.h>
 #include <workerd/api/analytics-engine.capnp.h>
@@ -195,6 +199,10 @@ Server::Server(kj::Filesystem& fs,
       memoryCacheProvider(kj::heap<api::MemoryCacheProvider>(timer)),
       channelTokenHandler(*this),
       tasks(*this) {
+  // NOTE(quarvo): must precede any isolate creation (JSG type registration consults
+  // meteringEnabled() to decide whether WorkerStub.getStats exists). Throws (fatal) on a
+  // typo'd QUARVO_RUNTIME_METERING value — see quarvo-metering.h.
+  quarvo::initMeteringFromEnv();
   quarvoGcPressureReclaimer = QuarvoGcPressureReclaimer::tryCreateFromEnv();
 }
 
@@ -2768,6 +2776,15 @@ class RequestObserverWithTracer final: public RequestObserver, public WorkerInte
   RequestObserverWithTracer(kj::Maybe<kj::Own<WorkerTracer>> tracer, kj::TaskSet& waitUntilTasks)
       : tracer(kj::mv(tracer)) {}
 
+  // NOTE(quarvo): carrier for metering per-request state; see quarvo-metering.h. createdMonoNs
+  // is stamped at construction (~request delivery) only when metering is on.
+  quarvo::RequestMeterState quarvoMeterState{
+    .createdMonoNs = quarvo::meteringEnabled() ? quarvo::nowMonoNs() : 0};
+
+  kj::Maybe<quarvo::RequestMeterState&> quarvoRequestState() override {
+    return quarvoMeterState;
+  }
+
   ~RequestObserverWithTracer() noexcept(false) {
     KJ_IF_SOME(t, tracer) {
       // for a more precise end time, set the end timestamp now, if available
@@ -4654,6 +4671,10 @@ struct Server::WorkerDef {
   // behavior). See QuarvoIsolateLimitEnforcer.
   kj::Maybe<uint32_t> dynamicMemoryLimitMb;
 
+  // NOTE(quarvo): meter for a dynamically-loaded worker's isolate; none for static workers or
+  // when QUARVO_RUNTIME_METERING is off. Created by WorkerStubImpl, shared with its stats path.
+  kj::Maybe<kj::Own<const quarvo::WorkerMeter>> quarvoMeter = kj::none;
+
   FutureSubrequestChannel globalOutbound;
   kj::Maybe<FutureSubrequestChannel> cacheApiOutbound;
   kj::Vector<FutureSubrequestChannel> subrequestChannels;
@@ -4714,16 +4735,26 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted, private kj::TaskSet:
         // isolate.
         kj::Function<void()> onAborted = [this, mapKey = kj::str(n)]() { removeIsolate(mapKey); };
 
+        // NOTE(quarvo): per-name generation counter for WorkerStats.epoch. Entries survive
+        // eviction (isolates map entry is erased, this one is not) so a respawn under the same
+        // name reports epoch+1 — the dispatcher's unambiguous counter-reset signal (spec §5.2).
+        uint32_t quarvoEpoch = 1;
+        KJ_IF_SOME(e, quarvoEpochs.find(n)) {
+          quarvoEpoch = ++e;
+        } else {
+          quarvoEpochs.insert(kj::str(n), 1);
+        }
+
         return {.key = kj::mv(n),
           .value = kj::rc<WorkerStubImpl>(
-              server, kj::mv(isolateName), kj::mv(onAborted), kj::mv(fetchSource))};
+              server, kj::mv(isolateName), kj::mv(onAborted), kj::mv(fetchSource), quarvoEpoch)};
       })
           .addRef()
           .toOwn();
     } else {
       auto isolateName = kj::str(namespaceName, ":dynamic:", randomUUID(server.entropySource));
-      auto stub =
-          kj::rc<WorkerStubImpl>(server, kj::mv(isolateName), kj::none, kj::mv(fetchSource));
+      auto stub = kj::rc<WorkerStubImpl>(
+          server, kj::mv(isolateName), kj::none, kj::mv(fetchSource), 1 /* quarvoEpoch */);
       // Unnamed workers have no entry in the isolates map, so the JS-side
       // IoOwn would be the sole owner. Retain an extra ref so that GC of the
       // JS handle during the getCode re-entry callback cannot destroy the
@@ -4751,6 +4782,10 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted, private kj::TaskSet:
 
   class WorkerStubImpl;
   kj::HashMap<kj::String, kj::Rc<WorkerStubImpl>> isolates;
+
+  // NOTE(quarvo): per-name isolate generation for WorkerStats.epoch — never erased, unlike
+  // `isolates` entries (bounded by the set of loader names, which quarvo controls).
+  kj::HashMap<kj::String, uint32_t> quarvoEpochs;
 
   // Holds tasks that keep unnamed WorkerStubImpl instances alive while their
   // start() coroutines are running. See the unnamed branch of loadIsolate().
@@ -4794,8 +4829,13 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted, private kj::TaskSet:
     WorkerStubImpl(Server& server,
         kj::String isolateName,
         kj::Maybe<kj::Function<void()>> onAborted,
-        kj::Function<kj::Promise<DynamicWorkerSource>()> fetchSource)
+        kj::Function<kj::Promise<DynamicWorkerSource>()> fetchSource,
+        uint32_t quarvoEpoch)
         : onAborted(kj::mv(onAborted)),
+          quarvoMeter(quarvo::meteringEnabled()
+                  ? kj::Maybe<kj::Own<const quarvo::WorkerMeter>>(
+                        kj::atomicRefcounted<quarvo::WorkerMeter>(quarvoEpoch))
+                  : kj::none),
           startupTask(start(server, kj::mv(isolateName), kj::mv(fetchSource)).fork()),
           cleanupTaskSet(server.tasks) {}
 
@@ -4839,10 +4879,20 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted, private kj::TaskSet:
       return kj::refcounted<ActorClassImpl>(addRefToThis(), kj::mv(name), kj::mv(props));
     }
 
+    kj::Maybe<quarvo::MeterSnapshot> getQuarvoStats() override {
+      // Never throws; before startup completes (or after eviction) the counters simply read
+      // zero / last-known. Lock-free relaxed loads — safe to call in the parent's admission loop.
+      return quarvoMeter.map([](auto& m) { return m->snapshot(); });
+    }
+
    private:
     // Callback to remove the worker stub from the isolates map. None for
     // unnamed dynamic isolates.
     kj::Maybe<kj::Function<void()>> onAborted;
+
+    // NOTE(quarvo): created eagerly (declared BEFORE startupTask: the forked start() coroutine
+    // reads it) so getQuarvoStats() never throws. none when metering is off.
+    kj::Maybe<kj::Own<const quarvo::WorkerMeter>> quarvoMeter;
 
     kj::Maybe<kj::Own<WorkerService>> service;  // null if still starting up
     kj::ForkedPromise<void> startupTask;        // resolves when `service` is non-null
@@ -4916,6 +4966,7 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted, private kj::TaskSet:
         .localActorConfigs = EMPTY_ACTOR_CONFIGS,
         .isDynamic = true,
         .dynamicMemoryLimitMb = dynamicMemoryLimitMb,
+        .quarvoMeter = quarvoMeter.map([](auto& m) { return kj::atomicAddRef(*m); }),
 
         // clang-format off
         .globalOutbound{
@@ -5234,7 +5285,19 @@ kj::Promise<kj::Own<Server::WorkerService>> Server::makeWorkerImpl(kj::StringPtr
   co_await preloadPython(name, def, errorReporter);
 
   auto jsgobserver = kj::atomicRefcounted<JsgIsolateObserver>();
-  auto observer = kj::atomicRefcounted<IsolateObserver>();
+  // NOTE(quarvo): when metering is on, EVERY isolate gets the quarvo observer — static isolates
+  // (meter = none) still feed the loop's busy chain, since their slices steal from quants too.
+  // When off, this is byte-identical to stock (plain IsolateObserver, tryCreateLockTiming none).
+  kj::Own<IsolateObserver> observer;
+  if (quarvo::meteringEnabled()) {
+    kj::Maybe<kj::Own<const quarvo::WorkerMeter>> meterRef;
+    KJ_IF_SOME(m, def.quarvoMeter) {
+      meterRef = kj::atomicAddRef(*m);
+    }
+    observer = kj::atomicRefcounted<quarvo::QuarvoIsolateObserver>(kj::mv(meterRef));
+  } else {
+    observer = kj::atomicRefcounted<IsolateObserver>();
+  }
   // QuarvoIsolateLimitEnforcer applies the per-isolate memory cap declared in a dynamically-loaded
   // Worker's `limits.memoryMB`. For statically-configured workers and dynamic workers without a
   // declared limit, `dynamicMemoryLimitMb` is none and this behaves exactly like the old
@@ -6380,9 +6443,25 @@ kj::Promise<void> Server::handleDrain(kj::Promise<void> drainWhen) {
   }
 }
 
+void Server::emitQuarvoBanner(config::Config::Reader config) {
+  // NOTE(quarvo): boot config banner (quarvo-banner.h) — after env parsing (Server ctor) and
+  // config load, so it reflects resolved state. Always prints, including all-off.
+  kj::Vector<kj::String> v8Flags;
+  for (auto flag: config.getV8Flags()) {
+    v8Flags.add(kj::str(flag));
+  }
+  kj::String gcFragment = kj::str("gc_pressure=off");
+  KJ_IF_SOME(reclaimer, quarvoGcPressureReclaimer) {
+    gcFragment = reclaimer->bannerFragment();
+  }
+  printQuarvoBanner(quarvo::meteringEnabled(), gcFragment, v8Flags.asPtr());
+}
+
 kj::Promise<void> Server::run(
     jsg::V8System& v8System, config::Config::Reader config, kj::Promise<void> drainWhen) {
   TRACE_EVENT("workerd", "Server.run");
+
+  emitQuarvoBanner(config);
 
   // Update logging settings from config (overridding structuredLogging when so)
   if (config.hasLogging()) {
@@ -6826,6 +6905,8 @@ kj::Promise<bool> Server::test(jsg::V8System& v8System,
     config::Config::Reader config,
     kj::StringPtr servicePattern,
     kj::StringPtr entrypointPattern) {
+
+  emitQuarvoBanner(config);
 
   if (config.hasLogging()) {
     auto logging = config.getLogging();

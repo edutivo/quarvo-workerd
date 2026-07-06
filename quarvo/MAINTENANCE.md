@@ -63,6 +63,35 @@ inert/no-op impls, which is exactly the seam we fill:
    signature (used to take the synchronous lock) and `Worker::Isolate::WeakIsolateRef`
    (= `AtomicWeakRef<Isolate>`, `src/workerd/util/weak-refs.h`) / `getWeakRef()` (the
    cross-thread-safe isolate reference the registry holds).
+7. **Runtime metering (fork feature, `QUARVO_RUNTIME_METERING`):** fork-owned files
+   `src/workerd/io/quarvo-metering.{h,c++}` (env gate — boot-fatal on typo — clocks, busy-chain
+   estimator, `WorkerMeter`, per-request carrier state) and
+   `src/workerd/io/quarvo-metering-observer.{h,c++}` (`QuarvoLockTiming` /
+   `QuarvoIsolateObserver` — the tree's first concrete `IsolateObserver::LockTiming`), plus
+   `src/workerd/server/quarvo-banner.{h,c++}` (boot config banner; **the compiled-in
+   `QUARVO_FORK_VERSION` constant lives here — bump it every release**, see the checklist
+   below). Upstream touch points, each small:
+   - `src/workerd/io/observer.h` — two added virtuals: `RequestObserver::quarvoRequestState()`
+     and `IsolateObserver::quarvoReportTimerLag()`; plus the `quarvo-metering.h` include.
+   - `src/workerd/io/io-channels.h` — `WorkerStubChannel::getQuarvoStats()` (default none).
+   - `src/workerd/io/io-context.c++` — timer-lateness capture in
+     `TimeoutManagerImpl::setTimeoutImpl` (must stay in the **outer** `paf.promise.then`
+     continuation, BEFORE `context.run()` — moving it inside the run lambda double-charges
+     timer entries in the estimator).
+   - `src/workerd/server/server.c++` — `quarvo::initMeteringFromEnv()` in the Server ctor
+     (before any isolate creation); the observer swap in `makeWorkerImpl` (quarvo observer for
+     ALL isolates when on — static isolates feed the busy chain meter-less);
+     `WorkerDef::quarvoMeter`; `WorkerStubImpl` meter + `quarvoEpochs` map in
+     `WorkerLoaderNamespace`; `RequestObserverWithTracer::quarvoMeterState`;
+     `emitQuarvoBanner()` called from `run()` and `test()`.
+   - `src/workerd/api/worker-loader.{h,c++}` — `WorkerStats` JSG struct +
+     `JSG_METHOD(getStats)` conditioned on `quarvo::meteringEnabled()` inside
+     `JSG_RESOURCE_TYPE(WorkerStub, …)`.
+   **Rebase watch:** the `LockTiming` interface shape (`observer.h`, `start/stop/locked/gc*`);
+   `tryCreateLockTiming` call sites (`worker.c++` — sync path in `Impl::Lock`'s ctor lambda,
+   async paths in `takeAsyncLock`); `metrics.locked()` in `Impl::Lock`'s ctor;
+   `TimeoutManagerImpl::setTimeoutImpl`'s promise structure; `WorkerStubChannel`'s virtuals.
+   Verify: `grep -n "quarvoRequestState\|quarvoReportTimerLag\|getQuarvoStats\|initMeteringFromEnv\|emitQuarvoBanner" src/workerd -r`.
 
 ## Enforcement design (why self-heal, not discard)
 
@@ -176,16 +205,22 @@ The repo is public, so GitHub-hosted Actions minutes and a public GHCR package a
    with the automatic `GITHUB_TOKEN` — no secrets needed. (Settings → Actions → General → Workflow
    permissions should allow read/write, or rely on the per-job block.)
 
-4. **Trigger a build** either way:
+4. **Bump the banner version constant** — `QUARVO_FORK_VERSION` in
+   `src/workerd/server/quarvo-banner.h` must equal the release version being tagged (the boot
+   banner is an ops contract; a stale value is a release blocker on par with the CHANGELOG
+   rule). `quarvo-banner-test` pins the naming scheme but cannot know the tag — check it here.
+
+5. **Trigger a build** either way:
    - Tag: `git tag v1.20260623.1-quarvo.1 && git push origin v1.20260623.1-quarvo.1`
    - Manual: Actions tab → "quarvo-release" → Run workflow → enter the version.
 
-5. **Make the package public + linked.** After the first push, open the org's Packages →
+6. **Make the package public + linked.** After the first push, open the org's Packages →
    `quarvo-workerd` → Package settings → set visibility **Public** and link it to this repo, so
    quarvo can `COPY --from=ghcr.io/...` without auth.
 
-6. **Verify:** `docker run --rm ghcr.io/<owner>/quarvo-workerd:<version> --version`, then a smoke
-   test loading a worker with `limits:{ memoryMB: 64 }` (see worker-loader-memory-test.js).
+7. **Verify:** `docker run --rm ghcr.io/<owner>/quarvo-workerd:<version> --version`, then a smoke
+   test loading a worker with `limits:{ memoryMB: 64 }` (see worker-loader-memory-test.js), and
+   check the boot banner line (`docker logs … | grep 'quarvo-workerd: '`) shows the new version.
 
 ## CI build caching (fast rebuilds)
 

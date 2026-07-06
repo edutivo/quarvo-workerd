@@ -354,6 +354,10 @@ class Server final: private kj::TaskSet::ErrorHandler, private ChannelTokenHandl
 
   void unlinkWorkerLoaders();
 
+  // NOTE(quarvo): boot config banner (quarvo-banner.h) — called from run() and test() once the
+  // config is available; env-derived feature state was already resolved in the constructor.
+  void emitQuarvoBanner(config::Config::Reader config);
+
   kj::Promise<void> preloadPython(
       kj::StringPtr workerName, const WorkerDef& workerDef, ErrorReporter& errorReporter);
 

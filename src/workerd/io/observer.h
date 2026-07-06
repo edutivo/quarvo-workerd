@@ -7,6 +7,7 @@
 // e.g. to collect logs and metrics.
 
 #include <workerd/io/features.capnp.h>
+#include <workerd/io/quarvo-metering.h>
 #include <workerd/io/trace.h>
 #include <workerd/jsg/observer.h>
 #include <workerd/util/sqlite.h>
@@ -80,6 +81,13 @@ class RequestObserver: public kj::Refcounted {
   // the event was canceled for some reason before delivery. No JavaScript was invoked. In this
   // case, the request should not be billed.
   virtual void delivered() {};
+
+  // NOTE(quarvo): per-request carrier state for runtime metering (startDelay / first-run
+  // detection / timer-lag suppression). Base returns none; RequestObserverWithTracer in
+  // server.c++ owns an instance when QUARVO_RUNTIME_METERING is on. See quarvo-metering.h.
+  virtual kj::Maybe<quarvo::RequestMeterState&> quarvoRequestState() {
+    return kj::none;
+  }
 
   // Call when no more JavaScript will run on behalf of this request. Note that deferred proxying
   // may still be in progress.
@@ -238,6 +246,10 @@ class IsolateObserver: public kj::AtomicRefcounted {
       kj::OneOf<SpanParent, kj::Maybe<RequestObserver&>> parentOrRequest) const {
     return kj::none;
   }
+
+  // NOTE(quarvo): timer-fire lateness (fire − scheduled deadline) reported by
+  // IoContext::TimeoutManagerImpl when runtime metering is on. Exact per spec §4.2.
+  virtual void quarvoReportTimerLag(uint64_t lagNs) const {}
 
   // Use like so:
   //

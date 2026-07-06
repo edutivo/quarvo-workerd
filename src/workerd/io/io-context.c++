@@ -6,6 +6,7 @@
 
 #include <workerd/io/access-info.h>
 #include <workerd/io/io-gate.h>
+#include <workerd/io/quarvo-metering.h>
 #include <workerd/io/tracer.h>
 #include <workerd/io/worker.h>
 #include <workerd/jsg/jsg.h>
@@ -821,11 +822,31 @@ void IoContext::TimeoutManagerImpl::setTimeoutImpl(IoContext& context, Iterator 
 
   // Schedule relative to Date.now() so the delay appears exact to the application.
   auto when = context.now() + state.params.msDelay * kj::MILLISECONDS;
+  // NOTE(quarvo): capture the monotonic deadline for exact timer-lateness metering (spec §4.2).
+  // context.now() above is the Spectre-frozen JS clock — never use it for lateness.
+  uint64_t quarvoDeadlineNs = quarvo::meteringEnabled()
+      ? quarvo::nowMonoNs() + state.params.msDelay * 1'000'000ull
+      : 0;
   // TODO(cleanup): The manual use of run() here (including carrying over the critical section) is
   //   kind of ugly, but using awaitIo() doesn't work here because we need the ability to cancel
   //   the timer, so we don't want to addTask() it, which awaitIo() does implicitly.
-  auto promise =
-      paf.promise.then([this, &context, it, cs = context.getCriticalSection()]() mutable {
+  auto promise = paf.promise.then(
+      [this, &context, it, quarvoDeadlineNs, cs = context.getCriticalSection()]() mutable {
+    // NOTE(quarvo): report lateness BEFORE context.run() requests the isolate lock — this runs
+    // pre-locked(), so the suppression flag applies to exactly this timer entry, keeping the
+    // busy-window estimator from double-charging a delay that is measured exactly here.
+    if (quarvo::meteringEnabled()) {
+      uint64_t quarvoNowNs = quarvo::nowMonoNs();
+      if (quarvoNowNs > quarvoDeadlineNs) {
+        context.getWorker().getIsolate().getMetrics().quarvoReportTimerLag(
+            quarvoNowNs - quarvoDeadlineNs);
+      }
+      if (context.hasCurrentIncomingRequest()) {
+        KJ_IF_SOME(st, context.getMetrics().quarvoRequestState()) {
+          st.suppressNextResumeCharge = true;
+        }
+      }
+    }
     return context.run([this, &context, it](Worker::Lock& lock) mutable {
       auto& state = it->second;
 

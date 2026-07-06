@@ -1001,6 +1001,23 @@ wd_test(
 )
 
 wd_test(
+    size = "large",
+    src = "worker-loader-metering-test.wd-test",
+    args = ["--experimental"],
+    data = ["worker-loader-metering-test.js"],
+    env = {
+        "QUARVO_RUNTIME_METERING": "on",
+    },
+)
+
+wd_test(
+    size = "large",
+    src = "worker-loader-metering-off-test.wd-test",
+    args = ["--experimental"],
+    data = ["worker-loader-metering-test.js"],
+)
+
+wd_test(
     src = "worker-loader-unnamed-gc-test.wd-test",
     args = ["--experimental"],
     data = ["worker-loader-unnamed-gc-test.js"],

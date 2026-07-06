@@ -64,6 +64,11 @@ class QuarvoGcPressureReclaimer final {
   // eliminates teardown-ordering use-after-free by construction.
   void registerIsolate(kj::Own<const Worker::Isolate::WeakIsolateRef> ref);
 
+  // Self-description for the boot config banner (quarvo-banner.h): "gc_pressure=on|inert" plus
+  // the EFFECTIVE resolved numbers (threshold after min(MB, PCT×memory.max), cgroup-derived
+  // when PCT applies). "inert" = enabled but no cgroup v2 visible (the reclaimer cannot act).
+  kj::String bannerFragment() const;
+
  private:
   const QuarvoGcPressureConfig config;
   kj::Maybe<kj::String> cgroupDir;  // resolved once in the ctor; none => feature inert

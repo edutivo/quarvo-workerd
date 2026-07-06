@@ -51,6 +51,31 @@ Recommended runner setting: `QUARVO_GC_PRESSURE=on` with `QUARVO_GC_PRESSURE_THR
 `resources.requests.memory` (Downward API, divisor `1Mi`). Leaving all of these **unset** is
 byte-identical to stock workerd — no thread, no registry, no behavior change.
 
+## Runtime env vars (runtime metering)
+
+`QUARVO_RUNTIME_METERING=on` enables the per-loader-key `stub.getStats()` meters (`cpuMs`,
+`stolenMs` + split counters, `startDelayMs`, `epoch`). Accepted values: `on/1/true/yes` /
+`off/0/false/no` (case-insensitive); unset/empty = off. **Any other value refuses to boot** —
+deliberately, so a typo'd deploy cannot run silently on the dispatcher's fallback estimator
+while dashboards believe they have runtime ground truth. Full semantics and accuracy notes:
+[FEATURES.md](FEATURES.md#runtime-metering-quarvo_runtime_metering--per-worker-stolenms--cpums).
+
+Consumer contract:
+
+- `dispatcher.js` must feature-detect (`typeof stub.getStats === "function"`) and fall back to
+  its statistical estimator when absent — the same bundle then runs unmodified on stock workerd.
+- **Never expose `getStats()` values to quant code** (via env, props, responses, or timing side
+  channels you control). Parent-only visibility is what keeps the Spectre clock-freeze
+  meaningful one layer down; re-exporting the counters to children re-opens cross-isolate
+  timing measurement.
+- Counters reset when an isolate is respawned under the same loader key; detect via the
+  `epoch` field, not value-decrease heuristics.
+
+At boot the runtime prints a one-line config banner (`quarvo-workerd: <version> metering=… …`)
+to stderr regardless of flag state — treat it as the authoritative "what is actually enabled"
+record for fleet audits (format contract in
+[FEATURES.md](FEATURES.md#boot-config-banner)).
+
 ## Distribution / pinning (drop-in swap)
 
 The first release matches quarvo's pinned upstream tag (`v1.20260623.1`) so **only enforcement

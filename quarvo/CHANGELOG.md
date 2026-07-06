@@ -19,6 +19,26 @@ Categories: **Added** (new capability) · **Changed** (behavior change) · **Fix
 
 ## [Unreleased]
 
+### Added
+- **Opt-in runtime metering** (`QUARVO_RUNTIME_METERING=on`): per-loader-key `stub.getStats()`
+  on the Worker Loader stub, returning `cpuMs` (thread-CPU in the worker's JS slices) and
+  `stolenMs` (runnable-but-not-running time stolen by other isolates on the shared JS thread;
+  split into exact `timerLagMs`/`lockWaitMs` and estimated `resumeDelayEstMs`), plus
+  `startDelayMs` (delivery → first instruction, excluded from `stolenMs`) and an `epoch`
+  counter that increments when an isolate is respawned under a live loader key. Parent-only by
+  construction; consumers feature-detect via `typeof stub.getStats === "function"`. Default off
+  is behavior-byte-identical to stock; an unrecognized flag value refuses to boot. ([#12])
+- **Boot config banner**: one `quarvo-workerd: <version> metering=… gc_pressure=… …` line on
+  stderr at startup stating the resolved state of every quarvo feature (fork version compiled
+  in; GC-pressure numbers are the effective post-resolution values, with an `inert` state when
+  no cgroup v2 is visible). Prints unconditionally — the one deliberate, documented exception
+  to "default off = byte-identical", requested by quarvo for fleet config audits. ([#12])
+
+### Internal
+- PR CI runs now upload the compiled `workerd` binary as a short-lived (1-day) per-arch
+  artifact (`workerd-amd64` / `workerd-arm64`), so smoke checks can run against the CI build
+  instead of waiting for a local compile. ([#12])
+
 ## [1.20260623.1-quarvo.4] — 2026-07-02
 
 **Upstream base:** workerd `v1.20260623.1` · **Image:** `…/quarvo-workerd:1.20260623.1-quarvo.4` ·
@@ -98,6 +118,7 @@ First quarvo release.
 - A single allocation larger than the headroom the enforcer grants can still fatally OOM the process
   before the request is torn down; use conservative caps for untrusted code.
 
+[#12]: https://github.com/edutivo/quarvo-workerd/pull/12
 [#9]: https://github.com/edutivo/quarvo-workerd/pull/9
 [#8]: https://github.com/edutivo/quarvo-workerd/pull/8
 [#6]: https://github.com/edutivo/quarvo-workerd/pull/6

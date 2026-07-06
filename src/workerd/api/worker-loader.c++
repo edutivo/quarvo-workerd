@@ -72,6 +72,29 @@ jsg::Ref<DurableObjectClass> WorkerStub::getDurableObjectClass(jsg::Lock& js,
       channel->getActorClass(kj::mv(entrypointName), kj::mv(props), limits)));
 }
 
+WorkerStub::WorkerStats WorkerStub::getStats(jsg::Lock& js) {
+  // Same IoOwn discipline as getEntrypoint(): the stub is bound to the IoContext that created
+  // it. Cross-request use requires re-get()ing the stub (cheap; named loads are cached).
+  auto stats = channel->getQuarvoStats();
+  KJ_IF_SOME(s, stats) {
+    constexpr double NS_PER_MS = 1e6;
+    double timerLagMs = s.timerLagNs / NS_PER_MS;
+    double lockWaitMs = s.lockWaitNs / NS_PER_MS;
+    double resumeDelayEstMs = s.resumeDelayEstNs / NS_PER_MS;
+    return {
+      .cpuMs = s.cpuNs / NS_PER_MS,
+      .stolenMs = timerLagMs + lockWaitMs + resumeDelayEstMs,
+      .timerLagMs = timerLagMs,
+      .lockWaitMs = lockWaitMs,
+      .resumeDelayEstMs = resumeDelayEstMs,
+      .startDelayMs = s.startDelayNs / NS_PER_MS,
+      .epoch = static_cast<int>(s.epoch),
+    };
+  }
+  // Channel without a meter (shouldn't happen when the method is registered, but never throw).
+  return {0, 0, 0, 0, 0, 0, 0};
+}
+
 jsg::Ref<WorkerStub> WorkerLoader::get(
     jsg::Lock& js, kj::Maybe<kj::String> name, jsg::Function<jsg::Promise<WorkerCode>()> getCode) {
   auto& ioctx = IoContext::current();

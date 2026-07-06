@@ -64,9 +64,13 @@ env:
   # Extra/override test targets for the quarvo-test stage; empty = Dockerfile default list.
   QUARVO_TEST_TARGETS: >-
     //src/workerd/server:quarvo-gc-pressure-test@
+    //src/workerd/server:quarvo-banner-test@
+    //src/workerd/io:quarvo-metering-test@
     //src/workerd/api/tests:worker-loader-memory-test@
     //src/workerd/api/tests:worker-loader-memory-gcpressure-test@
     //src/workerd/api/tests:worker-loader-limits-test@
+    //src/workerd/api/tests:worker-loader-metering-test@
+    //src/workerd/api/tests:worker-loader-metering-off-test@
 
 jobs:
   build:
@@ -156,6 +160,19 @@ jobs:
           # Reclaim the multi-GB buildkit layers before the thin build + cache tar.
           docker buildx prune -af || true
           df -h / || true
+
+      # NOTE(quarvo): on PR runs, upload the just-extracted binary as a short-lived artifact so a
+      # reviewer (or the maintainer's dev box, which may be far slower than the warm CI cache) can
+      # download it for boot/banner smoke checks instead of rebuilding locally. Release runs don't
+      # need this — they publish the image.
+      - name: Upload workerd binary artifact (PR runs)
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: workerd-${{ matrix.arch }}
+          path: ${{ runner.temp }}/out/workerd-bin
+          retention-days: 1
+          if-no-files-found: error
 
       # Everything below this point only runs for a RELEASE (tag push / manual dispatch). On a
       # quarvo-main cache-warm run the steps above already built + (via the Save step) persisted the
