@@ -34,6 +34,11 @@ Categories: **Added** (new capability) · **Changed** (behavior change) · **Fix
   no cgroup v2 is visible). Prints unconditionally — the one deliberate, documented exception
   to "default off = byte-identical", requested by quarvo for fleet config audits. ([#12])
 
+### Internal
+- PR CI runs now upload the compiled `workerd` binary as a short-lived (1-day) per-arch
+  artifact (`workerd-amd64` / `workerd-arm64`), so smoke checks can run against the CI build
+  instead of waiting for a local compile. ([#12])
+
 ## [1.20260623.1-quarvo.4] — 2026-07-02
 
 **Upstream base:** workerd `v1.20260623.1` · **Image:** `…/quarvo-workerd:1.20260623.1-quarvo.4` ·
