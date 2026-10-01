@@ -69,8 +69,13 @@ All verified against this repo and the vendored V8 15.0.245.5
    sweeps cppgc with `FreeMemoryHandling::kReleaseMemory` — free pages returned to
    the OS. workerd's CppHeap uses **atomic sweeping**
    (`src/workerd/jsg/setup.c++:348-355`), so the sweep completes within the call.
-3. **Foreign-thread GC under the full lock stack has an in-tree production
-   precedent:** the inspector thread takes a synchronous lock
+3. **~~Foreign-thread GC under the full lock stack has an in-tree production
+   precedent~~ (CORRECTED 2026-10-01: false).** The inspector's `channel` is "only accessed on
+   the isolate thread" (`worker.c++` InspectorChannelImpl), so no in-tree code ran a GC from a
+   foreign thread. That gap bit us: a foreign thread must also have been created AFTER V8's
+   platform allocated its memory-protection key, or its PKRU denies access to V8's pointer
+   tables (SEGV_PKUERR, see CHANGELOG Unreleased/Fixed). The original claim read: the inspector thread takes a
+   synchronous lock
    (`Impl::Lock` + `TakeSynchronously` inside `jsg::runInV8Stack`) and runs
    `TakeHeapSnapshot` — which forces a full GC — from a non-request thread
    (`src/workerd/io/worker.c++:3354-3419`). GC prologue/epilogue callbacks assert

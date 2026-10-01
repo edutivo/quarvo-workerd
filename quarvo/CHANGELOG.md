@@ -19,6 +19,20 @@ Categories: **Added** (new capability) · **Changed** (behavior change) · **Fix
 
 ## [Unreleased]
 
+### Fixed
+- **GC-pressure reclaimer segfault on PKU-capable hosts** (`QUARVO_GC_PRESSURE`, affected
+  `quarvo.4` and `quarvo.5`): the background reclaim thread was created before V8's platform
+  allocated its x86 memory-protection key, so the thread had no access to V8's code-pointer /
+  JS-dispatch tables and workerd died with SIGSEGV (`SEGV_PKUERR`) on the first reclaim round
+  that ran against an idle isolate — every ~30 s on affected nodes (AMD EPYC / Intel Xeon with
+  PKU), never on CPUs/VMs without PKU (arm64, some cloud VMs). The thread now starts on the first
+  isolate registration, after V8 init. No config change needed; no behavior change otherwise.
+
+### Internal
+- Regression coverage: a unit test that construction starts no reclaim thread, and
+  `quarvo/e2e/gc-idle/run.sh` (idle single-worker config, 1 MB threshold, asserts survival;
+  meaningful only on PKU hosts, which the script reports).
+
 ## [1.20260623.1-quarvo.5] — 2026-07-06
 
 **Upstream base:** workerd `v1.20260623.1` · **Image:** `…/quarvo-workerd:1.20260623.1-quarvo.5` ·

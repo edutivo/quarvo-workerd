@@ -13,7 +13,7 @@ namespace workerd::server {
 
 // Bumped as part of the release checklist (quarvo/MAINTENANCE.md) — a stale value here is a
 // release blocker on par with the CHANGELOG rule. The unit test pins the naming scheme.
-constexpr kj::StringPtr QUARVO_FORK_VERSION = "1.20260623.1-quarvo.5"_kj;
+constexpr kj::StringPtr QUARVO_FORK_VERSION = "1.20260623.1-quarvo.6"_kj;
 
 // Pure composition, unit-tested. gcFragment is the GC-pressure reclaimer's self-description
 // ("gc_pressure=off" / "gc_pressure=on ..." / "gc_pressure=inert ...").
