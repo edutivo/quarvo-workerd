@@ -162,8 +162,7 @@ QuarvoGcPressureReclaimer::QuarvoGcPressureReclaimer(QuarvoGcPressureConfig conf
           }
         }
         return kj::none;
-      }()),
-      thread([this]() { threadMain(); }) {}
+      }()) {}
 
 QuarvoGcPressureReclaimer::~QuarvoGcPressureReclaimer() noexcept(false) {
   // Body runs before member destructors; `thread`'s destructor (first, it is the last member)
@@ -173,21 +172,34 @@ QuarvoGcPressureReclaimer::~QuarvoGcPressureReclaimer() noexcept(false) {
 
 void QuarvoGcPressureReclaimer::registerIsolate(
     kj::Own<const Worker::Isolate::WeakIsolateRef> ref) {
-  // Inert (no cgroup v2): the reclaim thread has exited and nothing would ever prune the
-  // registry, so don't grow it.
+  startThreadOnce();
+  // Inert (no cgroup v2): there is no reclaim thread and nothing would ever prune the registry,
+  // so don't grow it.
   if (cgroupDir == kj::none) return;
   registry.lockExclusive()->add(kj::mv(ref));
 }
 
-void QuarvoGcPressureReclaimer::threadMain() {
-  // Startup logging lives here (not in the ctor body) so the ctor cannot throw after the thread
-  // has started, and so all logging happens on the reclaim thread by construction.
+bool QuarvoGcPressureReclaimer::threadStarted() const {
+  return threadSlot.lockShared()->thread != kj::none;
+}
+
+void QuarvoGcPressureReclaimer::startThreadOnce() {
+  auto slot = threadSlot.lockExclusive();
+  if (slot->attempted) return;
+  slot->attempted = true;
   if (cgroupDir == kj::none) {
     KJ_LOG(WARNING,
         "QUARVO_GC_PRESSURE is on but no cgroup v2 hierarchy was found "
         "(/proc/self/cgroup has no 0:: entry); the feature is inert");
     return;
   }
+  // See the note on `threadSlot`: this must run after V8 platform init, never from the ctor.
+  slot->thread.emplace([this]() { threadMain(); });
+}
+
+void QuarvoGcPressureReclaimer::threadMain() {
+  // Startup logging lives here (not in the ctor body) so all reclaim-thread logging happens on
+  // the reclaim thread by construction. (Only started when cgroupDir is resolved.)
   KJ_IF_SOME(dir, cgroupDir) {
     KJ_LOG(INFO, "quarvo GC-pressure reclaimer enabled", dir, config.thresholdPct,
         config.thresholdBytes.orDefault(0) >> 20, config.minIntervalMs);

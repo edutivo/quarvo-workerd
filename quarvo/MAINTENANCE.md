@@ -55,14 +55,21 @@ inert/no-op impls, which is exactly the seam we fill:
    fork-owned files (config parsing, the cgroup v2 reader, the `WeakIsolateRef` registry, and the
    reclaim thread) — kept separate from upstream files to minimize the diff. The upstream touch
    points are small: `Worker::Isolate::memoryPressureReclaim()` (`src/workerd/io/worker.{h,c++}`)
-   — a synchronous, fully-locked, critical `MemoryPressureNotification`, mirroring the
-   inspector's `TakeHeapSnapshot` foreign-thread-lock pattern — and `Server`, where the
+   — a synchronous, fully-locked, critical `MemoryPressureNotification` (NB: the inspector's
+   `TakeHeapSnapshot` runs on the isolate thread, so it is *not* a foreign-thread precedent) —
+   and `Server`, where the
    `quarvoGcPressureReclaimer` member is declared **last** (so it tears down, and its thread
    joins, before any isolate it references) and every isolate is registered with it inside
    `makeWorkerImpl`, next to the inspector registrar. **Rebase watch:** `Impl::Lock`'s constructor
    signature (used to take the synchronous lock) and `Worker::Isolate::WeakIsolateRef`
    (= `AtomicWeakRef<Isolate>`, `src/workerd/util/weak-refs.h`) / `getWeakRef()` (the
-   cross-thread-safe isolate reference the registry holds).
+   cross-thread-safe isolate reference the registry holds). **Thread-start ordering (do not
+   "simplify"):** the reclaim thread MUST be created after V8 platform init — it starts on the
+   first `registerIsolate()`, never in the constructor — because V8's default platform allocates
+   an x86 pkey that guards its code-pointer/JS-dispatch tables and threads inherit PKRU at
+   creation; an earlier thread SIGSEGVs (`SEGV_PKUERR`) in its first forced GC on PKU hosts
+   (quarvo.4/.5 bug; guarded by `quarvo-gc-pressure-test` + `quarvo/e2e/gc-idle`). Re-check this on
+   every V8 bump and for any future foreign thread that locks an isolate.
 7. **Runtime metering (fork feature, `QUARVO_RUNTIME_METERING`):** fork-owned files
    `src/workerd/io/quarvo-metering.{h,c++}` (env gate — boot-fatal on typo — clocks, busy-chain
    estimator, `WorkerMeter`, per-request carrier state) and

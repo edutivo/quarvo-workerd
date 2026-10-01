@@ -62,7 +62,15 @@ class QuarvoGcPressureReclaimer final {
   // Thread-safe; called from Server::makeWorkerImpl for every isolate (static and dynamic).
   // Dead refs are pruned lazily by the reclaim thread — no deregistration call exists, which
   // eliminates teardown-ordering use-after-free by construction.
+  //
+  // The FIRST call also starts the reclaim thread (never the constructor). The caller must hold
+  // a live isolate, which proves V8 platform init has run — see the thread-start note in
+  // threadSlot below for why that ordering is load-bearing.
   void registerIsolate(kj::Own<const Worker::Isolate::WeakIsolateRef> ref);
+
+  // True once the reclaim thread has been started (false while idle-before-first-isolate, and
+  // forever when inert). Exposed for the "no thread before V8 init" regression test.
+  bool threadStarted() const;
 
   // Self-description for the boot config banner (quarvo-banner.h): "gc_pressure=on|inert" plus
   // the EFFECTIVE resolved numbers (threshold after min(MB, PCT×memory.max), cgroup-derived
@@ -78,10 +86,25 @@ class QuarvoGcPressureReclaimer final {
   bool warnedNoThreshold = false;
   // Consecutive memory.current read failures (reclaim-thread-only); warns once at 10.
   uint currentReadFailures = 0;
-  // MUST be the last member: the thread starts in the constructor (all state above must be
-  // initialized) and kj::Thread's destructor joins (runs first, before other members die).
-  kj::Thread thread;
+  struct ThreadSlot {
+    bool attempted = false;
+    kj::Maybe<kj::Thread> thread;
+  };
+  // Started lazily by the first registerIsolate(), NOT in the constructor. The Server (and so
+  // this object) is constructed BEFORE the V8 platform exists, and V8's default platform
+  // allocates the x86 memory-protection key (pkey_alloc) that guards its code-pointer /
+  // JS-dispatch tables during platform init. A thread inherits PKRU from its creator at clone
+  // time, so a reclaim thread created earlier keeps the kernel default PKRU (access to every
+  // non-zero pkey DISABLED) and SIGSEGVs (SEGV_PKUERR) the first time its forced GC touches
+  // those tables. Threads created after V8 init inherit the key's access. Invisible on CPUs/VMs
+  // without PKU (arm64, many cloud VMs), which is why it only crashed on some hosts.
+  //
+  // MUST be the last member: kj::Thread's destructor joins (runs first, before other members
+  // die), so every field threadMain() touches must outlive it.
+  kj::MutexGuarded<ThreadSlot> threadSlot;
 
+  // Idempotent. Logs the "inert" warning (no cgroup v2) instead of starting a thread.
+  void startThreadOnce();
   void threadMain();
   void tick();
   void runRound(uint64_t usageBytes, uint64_t thresholdBytes);

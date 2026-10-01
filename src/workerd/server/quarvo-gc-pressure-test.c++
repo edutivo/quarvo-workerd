@@ -89,5 +89,21 @@ KJ_TEST("quarvo gc-pressure: effective threshold — lower wins") {
   KJ_EXPECT(KJ_ASSERT_NONNULL(effectiveThresholdBytes(c, uint64_t(199))) == 99);
 }
 
+// Regression: the reclaim thread must NOT exist before the first registerIsolate(). The Server
+// constructs this object before the V8 platform allocates its memory-protection key; a thread
+// created earlier keeps the kernel-default PKRU (pkey access disabled) and SIGSEGVs with
+// SEGV_PKUERR on its first forced GC — but only on PKU-capable hosts, so a crash-based test
+// would pass vacuously on most CI runners. Assert the ordering invariant instead.
+KJ_TEST("quarvo gc-pressure: no reclaim thread is started by construction") {
+  QuarvoGcPressureConfig config;
+  config.thresholdBytes = 1ull << 20;
+  config.minIntervalMs = 1000;
+  QuarvoGcPressureReclaimer reclaimer(config);
+  KJ_EXPECT(!reclaimer.threadStarted());
+  // The banner path (also run at construction time, before V8 init) must not start it either.
+  auto banner = reclaimer.bannerFragment();
+  KJ_EXPECT(!reclaimer.threadStarted(), banner);
+}
+
 }  // namespace
 }  // namespace workerd::server
