@@ -19,6 +19,11 @@ Categories: **Added** (new capability) · **Changed** (behavior change) · **Fix
 
 ## [Unreleased]
 
+## [1.20260623.1-quarvo.6] — 2026-10-02
+
+**Upstream base:** workerd `v1.20260623.1` · **Image:** `…/quarvo-workerd:1.20260623.1-quarvo.6` ·
+**Index digest:** `sha256:2b98540511a44525deadfbeff4688d802ea87312f28a5cc92f5dd9f18e368690`
+
 ### Fixed
 - **GC-pressure reclaimer segfault on PKU-capable hosts** (`QUARVO_GC_PRESSURE`, affected
   `quarvo.4` and `quarvo.5`): the background reclaim thread was created before V8's platform
@@ -27,11 +32,13 @@ Categories: **Added** (new capability) · **Changed** (behavior change) · **Fix
   that ran against an idle isolate — every ~30 s on affected nodes (AMD EPYC / Intel Xeon with
   PKU), never on CPUs/VMs without PKU (arm64, some cloud VMs). The thread now starts on the first
   isolate registration, after V8 init. No config change needed; no behavior change otherwise.
+  Upgrade is the fix: quarvo.4 and quarvo.5 should not be used with `QUARVO_GC_PRESSURE=on` on
+  PKU-capable nodes. ([#14])
 
 ### Internal
 - Regression coverage: a unit test that construction starts no reclaim thread, and
   `quarvo/e2e/gc-idle/run.sh` (idle single-worker config, 1 MB threshold, asserts survival;
-  meaningful only on PKU hosts, which the script reports).
+  meaningful only on PKU hosts, which the script reports). ([#14])
 
 ## [1.20260623.1-quarvo.5] — 2026-07-06
 
@@ -137,6 +144,7 @@ First quarvo release.
 - A single allocation larger than the headroom the enforcer grants can still fatally OOM the process
   before the request is torn down; use conservative caps for untrusted code.
 
+[#14]: https://github.com/edutivo/quarvo-workerd/pull/14
 [#12]: https://github.com/edutivo/quarvo-workerd/pull/12
 [#9]: https://github.com/edutivo/quarvo-workerd/pull/9
 [#8]: https://github.com/edutivo/quarvo-workerd/pull/8
